@@ -7,7 +7,7 @@ Every release gets an entry here. The release build fails without one, and the t
 - Copy any emote link on 7tv.app and the app notices it: a bar pops up with **Save now**
 - Pick where emotes are saved, right under the Save button: the app's own folder (new default), Downloads, Pictures, Desktop or any folder you like
 - Tray icon: keep the app running in the system tray, with quick actions (Browse 7TV, save the copied link, open the emotes folder, check for updates)
-- New app icon, plus pop-up notifications when an emote is saved
+- Pop-up notifications when an emote is saved
 - Clearer cutting: the preview now shows every piece separately with its :name: under it
 - Auto now cuts wide emotes into enough square pieces that each one fills the full height (a 384×112 emote like OdaMeeting becomes 4 pieces, :OdaMeeting1: … :OdaMeeting4:)
 - Pick the number of pieces with Wide / Tall buttons; press Auto to go back to the automatic choice
