@@ -61,7 +61,7 @@ python emotes_downloader.py --update
 ## Releasing a new version (for the maintainer)
 
 1. Change `__version__` near the top of `emotes_downloader.py`, for example to `"1.0.1"`.
-2. Commit and push, then tag the commit:
+2. Commit and push, then either publish a release on GitHub (Releases → Draft a new release → new tag `v1.0.1`) or tag the commit:
    ```
    git tag v1.0.1
    git push origin v1.0.1
