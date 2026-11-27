@@ -62,7 +62,14 @@ console.log("✓ /emote command registered");
 
 // 2. Interactions endpoint. A new workers.dev address can take a few minutes to start answering.
 const app = await call("GET", "/applications/@me");
-const DESCRIPTION = botBio(PUBLIC_URL, app.approximate_guild_count);
+let servers = 0;
+for (let after = "", i = 0; i < 50; i++) {                 // count the bot's servers (approximate_guild_count lags)
+  const page = await call("GET", `/users/@me/guilds?limit=200${after ? `&after=${after}` : ""}`);
+  servers += page.length;
+  if (page.length < 200) break;
+  after = page[page.length - 1].id;
+}
+const DESCRIPTION = botBio(PUBLIC_URL, servers);
 const want = `${PUBLIC_URL}/interactions`;
 const patch = {};
 if (app.interactions_endpoint_url !== want) patch.interactions_endpoint_url = want;

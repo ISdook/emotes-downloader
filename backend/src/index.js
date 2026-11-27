@@ -235,13 +235,17 @@ async function serverCount(env) {
   return cached("server-count", 60, async () => {
     const r = await discord(env, "GET", "/applications/@me", { bot: true });
     if (r.status !== 200) throw discordError(r);
-    return { servers: Number(r.data.approximate_guild_count || 0), description: r.data.description || "" };
+    // approximate_guild_count can lag behind (it showed 0), so count the bot's servers ourselves.
+    const ids = await botGuildIds(env).catch(() => null);
+    const servers = ids ? ids.length : Number(r.data.approximate_guild_count || 0);
+    return { servers, description: r.data.description || "" };
   });
 }
 
 // Keeps the bot's bio up to date with the server count (cron, every 30 minutes).
 async function updateBio(env) {
   await forgetCache("server-count");
+  await forgetCache("bot-guilds");
   const { servers, description } = await serverCount(env);
   const bio = botBio(env.PUBLIC_URL, servers);
   if (bio === description) return;
