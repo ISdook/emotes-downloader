@@ -17,6 +17,7 @@ Run with no arguments for the window, or use the command line:
 import argparse
 import io
 import json
+import math
 import os
 import queue
 import re
@@ -30,12 +31,12 @@ import urllib.request
 from pathlib import Path
 
 try:
-    from PIL import Image, ImageSequence, ImageStat
+    from PIL import Image, ImageChops, ImageSequence, ImageStat
 except ImportError:  # pragma: no cover
     print("Pillow is missing. Install it with:  python -m pip install pillow")
     sys.exit(1)
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 UA = f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) emotes-downloader/{__version__}"
 GITHUB_REPO = "ISdook/emotes-downloader"
 PORTABLE_ASSET = "Emotes-Downloader-Portable.exe"
@@ -55,11 +56,16 @@ LANCZOS = Image.Resampling.LANCZOS
 
 # Quality tiers tried in order until every piece fits under the limit:
 # (palette colours, keep every Nth frame, scale of tile size)
+# (palette colours, keep every Nth frame, scale of piece size, "unchanged pixel" threshold)
+# Keeps every frame as long as possible and shrinks the size first: Discord never shows an
+# emote bigger than 48 px, so 96/72/64/48 px pieces still look sharp, but dropped frames look choppy.
 GIF_TIERS = [
-    (256, 1, 1.0), (192, 1, 1.0), (128, 1, 1.0),
-    (256, 1, 0.75), (128, 1, 0.75), (96, 1, 0.75),
-    (128, 2, 0.75), (64, 2, 0.75), (64, 2, 0.5),
-    (48, 3, 0.5), (32, 4, 0.5), (32, 6, 0.375),
+    (256, 1, 1.0, 0), (256, 1, 1.0, 10), (160, 1, 1.0, 16),
+    (256, 1, 0.75, 10), (160, 1, 0.75, 16),
+    (192, 1, 0.5625, 12), (128, 1, 0.5, 14), (128, 1, 0.4375, 16),
+    (128, 1, 0.375, 16),
+    (96, 2, 0.5, 16), (96, 2, 0.375, 18),
+    (64, 1, 0.25, 18), (64, 2, 0.25, 22), (48, 3, 0.25, 28),
 ]
 PNG_TIERS = [(False, 1.0), (True, 1.0), (True, 0.75), (True, 0.5)]
 
@@ -202,15 +208,40 @@ def folder_name(title):
     return re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", title or "").strip(" .") or "emotes"
 
 
+def auto_grid(w, h):
+    """How many square pieces an emote needs so each piece is one full-height square.
+    e.g. 384x112 (3.4:1) -> 4 pieces, 256x128 (2:1) -> 2, 128x112 -> 1 (not cut)."""
+    r = w / h
+    if r >= 1:
+        return (1 if r < 1.5 else min(MAX_GRID, math.ceil(r - 0.25))), 1
+    r = 1 / r
+    return 1, (1 if r < 1.5 else min(MAX_GRID, math.ceil(r - 0.25)))
+
+
 def plan_grid(w, h, mode, cols=1, rows=1):
     if mode == "none":
         return 1, 1
     if mode == "auto":
-        r = w / h
-        if r >= 1:
-            return min(MAX_GRID, max(1, round(r))), 1
-        return 1, min(MAX_GRID, max(1, round(1 / r)))
+        return auto_grid(w, h)
     return max(1, min(MAX_GRID, int(cols))), max(1, min(MAX_GRID, int(rows)))
+
+
+def resolve_fit(fit, w, h, cols, rows):
+    """'auto' = fill every piece completely (stretch a little) when the shape is close,
+    otherwise add transparent bars so nothing gets squashed."""
+    if fit != "auto":
+        return fit
+    d = (cols / rows) / (w / h)
+    if cols * rows > 1:
+        return "stretch" if 0.75 <= d <= 1.34 else "contain"
+    return "stretch" if 0.95 <= d <= 1.05 else "contain"
+
+
+def piece_names(name, count):
+    if count == 1:
+        return [sanitize_name(name)]
+    base = sanitize_name(name, len(str(count)))
+    return [f"{base}{i}" for i in range(1, count + 1)]
 
 
 def fit_frame(img, W, H, fit):
@@ -230,6 +261,7 @@ def fit_frame(img, W, H, fit):
 
 def compose(frames, cols, rows, tile, fit):
     W, H = cols * tile, rows * tile
+    fit = resolve_fit(fit, *frames[0][0].size, cols, rows)
     return [(fit_frame(f, W, H, fit), d) for f, d in frames]
 
 
@@ -272,7 +304,20 @@ def _prep(img):
     return rgb, tmask, has_t
 
 
-def encode_gif(frames, colors=256, step=1, scale=1.0):
+def _palette(rgbs, ncol):
+    """One shared palette for all frames (no flicker, smaller file)."""
+    sample = rgbs if len(rgbs) <= 24 else [rgbs[round(i * (len(rgbs) - 1) / 23)] for i in range(24)]
+    w, h = sample[0].size
+    montage = Image.new("RGB", (w * len(sample), h))
+    for i, im in enumerate(sample):
+        montage.paste(im, (i * w, 0))
+    pal_img = montage.quantize(colors=ncol, method=Image.Quantize.MEDIANCUT, dither=Image.Dither.NONE)
+    pal = pal_img.getpalette()[: ncol * 3]
+    pal_img.putpalette(pal)
+    return pal_img, pal, len(pal) // 3
+
+
+def encode_gif(frames, colors=256, step=1, scale=1.0, thresh=0):
     fr = _merge_frames(frames, step)
     if scale < 1.0:
         w, h = fr[0][0].size
@@ -280,20 +325,36 @@ def encode_gif(frames, colors=256, step=1, scale=1.0):
         fr = [(f.resize(size, LANCZOS), d) for f, d in fr]
     preps = [_prep(f) for f, _ in fr]
     any_t = any(p[2] for p in preps)
-    ncol = min(colors, 255) if any_t else min(colors, 256)
+    durations = [d for _, d in fr]
+    buf = io.BytesIO()
 
-    # One shared palette for all frames (no flicker, smaller file).
-    sample = preps if len(preps) <= 24 else [preps[round(i * (len(preps) - 1) / 23)] for i in range(24)]
-    w, h = sample[0][0].size
-    montage = Image.new("RGB", (w * len(sample), h))
-    for i, (rgb, _, _) in enumerate(sample):
-        montage.paste(rgb, (i * w, 0))
-    pal_img = montage.quantize(colors=ncol, method=Image.Quantize.MEDIANCUT, dither=Image.Dither.NONE)
-    pal = pal_img.getpalette()[: ncol * 3]
-    n = len(pal) // 3
-    pal_img.putpalette(pal)
+    if not any_t and len(preps) > 1:
+        # Opaque animation (video-like): store only what changes between frames.
+        # Pixels that look the same as what's already on screen become transparent,
+        # and the previous frame stays visible underneath (disposal 1). Same trick as gifsicle.
+        pal_img, pal, n = _palette([p[0] for p in preps], min(colors, 255))
+        tindex = n
+        lut = [255 if v <= thresh else 0 for v in range(256)]
+        out, shown = [], None
+        for rgb, _, _ in preps:
+            q = rgb.quantize(palette=pal_img, dither=Image.Dither.NONE)
+            q.putpalette(pal + [0, 0, 0] * (256 - n))
+            qrgb = q.convert("RGB")
+            if shown is not None:
+                r, g, b = ImageChops.difference(rgb, shown).split()
+                same = ImageChops.lighter(ImageChops.lighter(r, g), b).point(lut)
+                q.paste(tindex, mask=same)
+                shown = Image.composite(shown, qrgb, same)
+            else:
+                shown = qrgb
+            q.info["transparency"] = tindex
+            out.append(q)
+        out[0].save(buf, "GIF", save_all=True, append_images=out[1:], duration=durations, loop=0,
+                    disposal=1, transparency=tindex, optimize=False)
+        return buf.getvalue()
+
+    pal_img, pal, n = _palette([p[0] for p in preps], min(colors, 255) if any_t else min(colors, 256))
     tindex = n  # first free slot after the real colours
-
     out = []
     for rgb, tmask, _ in preps:
         q = rgb.quantize(palette=pal_img, dither=Image.Dither.FLOYDSTEINBERG)
@@ -302,10 +363,7 @@ def encode_gif(frames, colors=256, step=1, scale=1.0):
             q.paste(tindex, mask=tmask)
             q.info["transparency"] = tindex
         out.append(q)
-
-    buf = io.BytesIO()
-    kw = dict(save_all=True, append_images=out[1:], duration=[d for _, d in fr],
-              loop=0, disposal=2, optimize=False)
+    kw = dict(save_all=True, append_images=out[1:], duration=durations, loop=0, disposal=2, optimize=False)
     if any_t:
         kw.update(transparency=tindex, background=tindex)
     out[0].save(buf, "GIF", **kw)
@@ -329,33 +387,41 @@ def encode_tiles(tiles, animated):
         for quant, scale in PNG_TIERS:
             data = [encode_png(t[0][0], quant, scale) for t in tiles]
             if max(map(len, data)) <= SAFE_LIMIT:
-                return data, "png", _note(quant=quant, scale=scale)
+                return data, "png", _note(256 if not quant else 255, 1, scale, tile=tiles[0][0][0].size[0])
         return data, "png", "WARNING: still over 256 KB"
-    data = None
-    for colors, step, scale in GIF_TIERS:
+    data, worst = None, 0
+    tile = tiles[0][0][0].size[0]
+    for colors, step, scale, thresh in GIF_TIERS:
         if step > 1 and len(tiles[0]) < step * 2:
             continue
-        data = [encode_gif(t, colors, step, scale) for t in tiles]
-        if max(map(len, data)) <= SAFE_LIMIT:
-            return data, "gif", _note(colors=colors, step=step, scale=scale)
-    return data, "gif", "WARNING: still over 256 KB - try fewer pieces or a smaller tile size"
+        # try the piece that was biggest last time first, and skip this level early if it doesn't fit
+        first = encode_gif(tiles[worst], colors, step, scale, thresh)
+        if len(first) > SAFE_LIMIT:
+            data = None
+            continue
+        data = [first if i == worst else encode_gif(t, colors, step, scale, thresh) for i, t in enumerate(tiles)]
+        worst = max(range(len(data)), key=lambda i: len(data[i]))
+        if len(data[worst]) <= SAFE_LIMIT:
+            return data, "gif", _note(colors, step, scale, tile=tile, frames=len(tiles[0]))
+    if data is None:
+        data = [encode_gif(t, *GIF_TIERS[-1]) for t in tiles]
+    return data, "gif", "WARNING: still over 256 KB - try fewer pieces"
 
 
-def _note(colors=256, step=1, scale=1.0, quant=False):
-    bits = []
-    if colors < 256:
-        bits.append(f"{colors} colours")
-    if quant:
-        bits.append("256 colours")
-    if step > 1:
-        bits.append(f"1 of every {step} frames")
-    if scale < 1.0:
-        bits.append(f"{int(scale * 100)}% size")
-    return ("shrunk to fit 256 KB: " + ", ".join(bits)) if bits else "full quality"
+def _note(colors=256, step=1, scale=1.0, tile=128, frames=1):
+    px = max(1, round(tile * scale))
+    bits = [f"{px}×{px} px"]
+    if frames > 1:
+        bits.append("all frames" if step == 1 else f"1 in {step} frames")
+    if colors < 160:
+        bits.append("fewer colours")
+    if scale >= 1.0 and step == 1 and colors >= 255:
+        return f"full quality, {px}×{px} px"
+    return "fit under 256 KB: " + ", ".join(bits)
 
 
 def make_emote(frames, name, out_dir, mode="none", cols=1, rows=1, tile=128,
-               fit="contain", original=None):
+               fit="auto", original=None):
     """Process and save. Returns dict(files, paste, note, folder)."""
     w, h = frames[0][0].size
     cols, rows = plan_grid(w, h, mode, cols, rows)
@@ -606,8 +672,8 @@ def apply_update(info, progress=None):
 # Settings
 # --------------------------------------------------------------------------
 
-DEFAULTS = dict(mode="auto", cols=2, rows=2, fit="contain", tile=128, keep_original=False,
-                check_updates=True, auto_install=True)
+DEFAULTS = dict(auto_grid=True, cols=2, rows=1, fit="auto", tile=128, keep_original=False,
+                check_updates=True, auto_install=True, cfg_version=2)
 
 
 def default_out_dir():
@@ -622,6 +688,8 @@ def load_config():
     except Exception:
         pass
     cfg.setdefault("out_dir", default_out_dir())
+    if cfg.get("cfg_version", 1) < 2:  # v1.1 settings: switch to the new auto cut + auto fill
+        cfg.update(auto_grid=cfg.get("mode", "auto") != "custom", fit="auto", cfg_version=2)
     return cfg
 
 
@@ -643,9 +711,7 @@ def open_folder(path):
 
 
 def paste_text(name, cols, rows):
-    n = cols * rows
-    base = sanitize_name(name, len(str(n)) if n > 1 else 0)
-    names = [base] if n == 1 else [f"{base}{i}" for i in range(1, n + 1)]
+    names = piece_names(name, cols * rows)
     return "\n".join("".join(f":{names[r * cols + c]}:" for c in range(cols)) for r in range(rows))
 
 
@@ -659,11 +725,11 @@ C = dict(
     accent="#7c5cff", accent_hover="#6847f5", blue="#3d8bff", blue_hover="#2f78e8",
     good="#34c77b", bad="#ff5d6e", warn="#f5b14c", discord="#313338",
 )
-MODES = {"None": "none", "Auto": "auto", "Grid": "custom"}
-FITS = {"Pad": "contain", "Crop": "cover", "Stretch": "stretch"}
-MODE_HELP = {"none": "Saved as one emote.",
-             "auto": "Wide emotes are cut into square pieces.",
-             "custom": "Cut into the grid you choose."}
+FITS = {"Fill": "auto", "Stretch": "stretch", "Bars": "contain", "Crop": "cover"}
+FIT_HELP = {"auto": "Each piece is filled edge to edge, like a normal emote.",
+            "stretch": "Always stretched to fill every piece.",
+            "contain": "Nothing is cut off; empty space becomes transparent.",
+            "cover": "Fills every piece by trimming the edges."}
 
 
 def _import_ctk():
@@ -884,37 +950,44 @@ def run_gui():
             ctl.grid_columnconfigure(0, weight=1)
             pad = dict(padx=18, sticky="ew")
 
-            self.section(ctl, "Cut into pieces").grid(row=0, column=0, pady=(16, 8), **pad)
-            self.mode_seg = self.segmented(ctl, list(MODES), lambda _v: self.on_mode())
-            self.mode_seg.grid(row=1, column=0, **pad)
-            self.mode_help = self.label(ctl, "", 12, "muted", anchor="w", justify="left", wraplength=270)
-            self.mode_help.grid(row=2, column=0, pady=(6, 0), **pad)
+            hdr = ctk.CTkFrame(ctl, fg_color="transparent")
+            hdr.grid(row=0, column=0, pady=(16, 8), **pad)
+            self.section(hdr, "Cut into pieces").pack(side="left")
+            self.auto = bool(self.cfg.get("auto_grid", True))
+            self.auto_btn = self.button(hdr, "Auto", self.on_auto, "accent", width=64, height=26,
+                                        corner_radius=13, font=self.F(12, True))
+            self.auto_btn.pack(side="right")
             self.grid_box = ctk.CTkFrame(ctl, fg_color="transparent")
+            self.grid_box.grid(row=1, column=0, **pad)
             self.cols_var = tk.IntVar(value=int(self.cfg["cols"]))
             self.rows_var = tk.IntVar(value=int(self.cfg["rows"]))
             self._stepper(self.grid_box, "Wide", self.cols_var).pack(side="left")
-            self._stepper(self.grid_box, "Tall", self.rows_var).pack(side="left", padx=(14, 0))
+            self._stepper(self.grid_box, "Tall", self.rows_var).pack(side="left", padx=(12, 0))
+            self.mode_help = self.label(ctl, "", 12, "muted", anchor="w", justify="left", wraplength=280)
+            self.mode_help.grid(row=2, column=0, pady=(8, 0), **pad)
 
             self.section(ctl, "Fit").grid(row=4, column=0, pady=(18, 8), **pad)
             self.fit_seg = self.segmented(ctl, list(FITS), lambda _v: self.on_option())
             self.fit_seg.grid(row=5, column=0, **pad)
+            self.fit_help = self.label(ctl, "", 12, "muted", anchor="w", justify="left", wraplength=280)
+            self.fit_help.grid(row=6, column=0, pady=(6, 0), **pad)
 
             self.save_btn = self.button(ctl, "Save for Discord", lambda: self.on_save(False), "accent",
                                         height=48, corner_radius=12, font=self.F(15, True))
-            self.save_btn.grid(row=6, column=0, pady=(22, 0), **pad)
+            self.save_btn.grid(row=7, column=0, pady=(20, 0), **pad)
             self.save_all_btn = self.button(ctl, "Save all", lambda: self.on_save(True), "ghost", height=38)
 
-            self.section(ctl, "Paste in Discord").grid(row=8, column=0, pady=(20, 8), **pad)
-            self.paste_box = ctk.CTkTextbox(ctl, height=76, corner_radius=10, border_width=1,
+            self.section(ctl, "Paste in Discord").grid(row=9, column=0, pady=(18, 8), **pad)
+            self.paste_box = ctk.CTkTextbox(ctl, height=64, corner_radius=10, border_width=1,
                                             border_color=C["border"], fg_color=C["field"],
                                             text_color=C["text"], font=(MONO, 12), wrap="char")
-            self.paste_box.grid(row=9, column=0, **pad)
+            self.paste_box.grid(row=10, column=0, **pad)
             brow = ctk.CTkFrame(ctl, fg_color="transparent")
-            brow.grid(row=10, column=0, pady=(8, 16), **pad)
+            brow.grid(row=11, column=0, pady=(8, 16), **pad)
             brow.grid_columnconfigure((0, 1), weight=1)
             self.button(brow, "Copy", self.on_copy, "blue").grid(row=0, column=0, sticky="ew", padx=(0, 4))
             self.button(brow, "Open folder", self.on_open_out, "ghost").grid(row=0, column=1, sticky="ew", padx=(4, 0))
-            ctl.grid_rowconfigure(11, weight=1)
+            ctl.grid_rowconfigure(12, weight=1)
 
             # ---- status bar
             sb = ctk.CTkFrame(r, fg_color="transparent")
@@ -929,12 +1002,9 @@ def run_gui():
             self.button(sb, "Log", self.show_log, "flat", width=54, height=26, font=self.F(12)).grid(row=0, column=3)
 
             # initial values
-            inv_m = {v: k for k, v in MODES.items()}
             inv_f = {v: k for k, v in FITS.items()}
-            self.mode_seg.set(inv_m.get(self.cfg["mode"], "Auto"))
-            self.fit_seg.set(inv_f.get(self.cfg["fit"], "Pad"))
+            self.fit_seg.set(inv_f.get(self.cfg["fit"], "Fill"))
             self._show_sidebar(False)
-            self.on_mode(save=False)
             self._set_buttons()
             self.refresh_preview()
 
@@ -944,6 +1014,7 @@ def run_gui():
 
             def bump(d):
                 var.set(max(1, min(MAX_GRID, var.get() + d)))
+                self.auto = False  # picking a number yourself turns Auto off
                 self.on_option()
             box = ctk.CTkFrame(f, fg_color=C["field"], corner_radius=10)
             box.pack(side="left")
@@ -1016,25 +1087,51 @@ def run_gui():
             self.save_all_btn.configure(state="disabled" if self.busy else "normal")
 
         def settings(self):
-            return dict(mode=MODES.get(self.mode_seg.get(), "auto"), cols=self.cols_var.get(),
+            return dict(mode="auto" if self.auto else "custom", cols=self.cols_var.get(),
                         rows=self.rows_var.get(), tile=int(self.cfg["tile"]),
-                        fit=FITS.get(self.fit_seg.get(), "contain"))
+                        fit=FITS.get(self.fit_seg.get(), "auto"))
 
         def remember(self):
             s = self.settings()
-            self.cfg.update(mode=s["mode"], cols=s["cols"], rows=s["rows"], fit=s["fit"])
+            self.cfg.update(auto_grid=self.auto, cols=s["cols"], rows=s["rows"], fit=s["fit"])
             save_config(self.cfg)
 
         # ================= options =================
-        def on_mode(self, save=True):
-            mode = MODES.get(self.mode_seg.get(), "auto")
-            self.mode_help.configure(text=MODE_HELP[mode])
-            if mode == "custom":
-                self.grid_box.grid(row=3, column=0, padx=18, pady=(10, 0), sticky="w")
+        def on_auto(self):
+            self.auto = True
+            self.on_option()
+
+        def _sync_grid(self):
+            """Show Auto's choice in the Wide/Tall boxes and explain the cut in words."""
+            it = self.current
+            loaded = it is not None and it["frames"] is not None
+            if self.auto and loaded:
+                c, r = auto_grid(*it["frames"][0][0].size)
+                self.cols_var.set(c)
+                self.rows_var.set(r)
+            self.auto_btn.configure(fg_color=C["accent"] if self.auto else C["card_hi"],
+                                    hover_color=C["accent_hover"] if self.auto else C["border"],
+                                    text_color="white" if self.auto else C["muted"])
+            c, r = self.cols_var.get(), self.rows_var.get()
+            n = c * r
+            if not loaded:
+                msg = ("Auto cuts wide emotes into square pieces, one per full height."
+                       if self.auto else f"{n} piece{'s' if n > 1 else ''}: {c} wide × {r} tall.")
             else:
-                self.grid_box.grid_forget()
-            if save:
-                self.on_option()
+                w, h = it["frames"][0][0].size
+                if n == 1:
+                    msg = f"Not cut: saved as 1 emote ({w}×{h} is about square)." if self.auto else "Not cut: saved as 1 emote."
+                elif self.auto:
+                    msg = f"This {w}×{h} emote is {w / h:.1f}× wider than tall, so Auto cuts it into {n} pieces."
+                else:
+                    msg = f"Cut into {n} pieces: {c} wide × {r} tall. Press Auto to go back."
+            self.mode_help.configure(text=msg)
+            fit = FITS.get(self.fit_seg.get(), "auto")
+            txt = FIT_HELP[fit]
+            if fit == "auto" and loaded:
+                real = resolve_fit("auto", *it["frames"][0][0].size, c, r)
+                txt = FIT_HELP["auto"] if real == "stretch" else "This shape is too different, so bars are added instead of squashing it."
+            self.fit_help.configure(text=txt)
 
         def on_option(self):
             self.remember()
@@ -1091,7 +1188,7 @@ def run_gui():
                 self.side_title.configure(text=f"IN THIS SET · {len(items)}")
                 for i, it in enumerate(items):
                     self._add_row(i, it)
-                self.save_all_btn.grid(row=7, column=0, padx=18, pady=(8, 0), sticky="ew")
+                self.save_all_btn.grid(row=8, column=0, padx=18, pady=(8, 0), sticky="ew")
                 self.all_var.set(False)
                 self._update_save_all()
             else:
@@ -1184,31 +1281,45 @@ def run_gui():
                 cv.create_text(cw // 2, ch // 2 + 16, text="Paste a 7TV link above, or open a GIF / PNG / WebP",
                                fill=C["muted"], font=(FAMILY, 11))
                 self.info_lbl.configure(text="")
+                self._sync_grid()
                 self.update_texts()
                 return
+            self._sync_grid()
             s = self.settings()
             frames = it["frames"]
             w, h = frames[0][0].size
             cols, rows = plan_grid(w, h, s["mode"], s["cols"], s["rows"])
-            pt = max(8, min(s["tile"] * 2, (cw - 40) // cols, (ch - 40) // rows))
-            comp = compose(frames[:300], cols, rows, pt, s["fit"])
-            self.anim_imgs = [(ImageTk.PhotoImage(f), d) for f, d in comp]
-            W, H = cols * pt, rows * pt
-            x0, y0 = (cw - W) // 2, (ch - H) // 2
-            self.img_id = cv.create_image(x0, y0, anchor="nw", image=self.anim_imgs[0][0])
             n = cols * rows
+            names = piece_names(it["name"], n)
+            gap = 14 if n > 1 else 0          # pieces are drawn apart so the cut is obvious
+            lab = 24 if n > 1 else 0          # room for each piece's :name: under it
+            pt = max(8, min(s["tile"] * 2, (cw - 40 - gap * (cols - 1)) // cols,
+                            (ch - 40 - lab * rows - gap * (rows - 1)) // rows))
+            comp = compose(frames[:300], cols, rows, pt, s["fit"])
+            W, H = cols * pt + gap * (cols - 1), rows * (pt + lab) + gap * (rows - 1)
+            pos = [(c * (pt + gap), r * (pt + lab + gap)) for r in range(rows) for c in range(cols)]
+            imgs = []
+            for f, d in comp:
+                if n > 1:
+                    sheet = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+                    for i, (px, py) in enumerate(pos):
+                        c, r = i % cols, i // cols
+                        sheet.paste(f.crop((c * pt, r * pt, (c + 1) * pt, (r + 1) * pt)), (px, py))
+                    f = sheet
+                imgs.append((ImageTk.PhotoImage(f), d))
+            self.anim_imgs = imgs
+            x0, y0 = (cw - W) // 2, (ch - H) // 2
+            for px, py in pos:
+                cv.create_rectangle(x0 + px - 1, y0 + py - 1, x0 + px + pt, y0 + py + pt, outline="#4a4d57")
+            self.img_id = cv.create_image(x0, y0, anchor="nw", image=self.anim_imgs[0][0])
             if n > 1:
-                for c in range(1, cols):
-                    cv.create_line(x0 + c * pt, y0, x0 + c * pt, y0 + H, fill=C["accent"], dash=(5, 4), width=2)
-                for rr in range(1, rows):
-                    cv.create_line(x0, y0 + rr * pt, x0 + W, y0 + rr * pt, fill=C["accent"], dash=(5, 4), width=2)
-                for i in range(n):
-                    tx, ty = x0 + (i % cols) * pt + 6, y0 + (i // cols) * pt + 6
-                    cv.create_rectangle(tx, ty, tx + 20, ty + 18, fill=C["accent"], outline="")
-                    cv.create_text(tx + 10, ty + 9, text=str(i + 1), fill="white", font=(FAMILY, 9, "bold"))
-            cv.create_rectangle(x0 - 1, y0 - 1, x0 + W, y0 + H, outline="#4a4d57")
+                font = (MONO, 10 if pt >= 70 else 8)
+                for i, (px, py) in enumerate(pos):
+                    text = f":{names[i]}:" if pt >= 70 else str(i + 1)
+                    cv.create_text(x0 + px + pt // 2, y0 + py + pt + 12, text=text, fill=C["text"], font=font)
             fmt = "GIF" if len(frames) > 1 else "PNG"
-            self.info_lbl.configure(text=f"{'1 emote' if n == 1 else f'{n} pieces · {cols}×{rows}'} · {s['tile']}px {fmt}")
+            self.info_lbl.configure(text=f"{'1 emote' if n == 1 else f'{n} pieces · {cols} wide × {rows} tall'}"
+                                         f" · square {fmt}{'s' if n > 1 else ''}")
             self.update_texts()
             if len(self.anim_imgs) > 1:
                 self._animate(0)
@@ -1505,7 +1616,8 @@ def run_cli(argv):
     ap.add_argument("source", help="7TV emote / emote-set / user link, emote ID, or a local image")
     ap.add_argument("--split", default="auto",
                     help="none | auto | COLSxROWS (e.g. 3x1 or 2x2). Default: auto")
-    ap.add_argument("--fit", default="contain", choices=["contain", "cover", "stretch"])
+    ap.add_argument("--fit", default="auto", choices=["auto", "stretch", "contain", "cover"],
+                    help="auto (default) fills each piece; contain adds bars; cover crops")
     ap.add_argument("--size", type=int, default=128, help="piece size in px (default 128)")
     ap.add_argument("--out", default=default_out_dir(), help="output folder")
     ap.add_argument("--name", help="emote name (single emote only)")

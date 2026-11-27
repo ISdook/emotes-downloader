@@ -36,14 +36,12 @@ The full history is in [CHANGELOG.md](CHANGELOG.md).
    - an emote set link: `https://7tv.app/emote-sets/<id>` (every emote in the set)
    - a user link: `https://7tv.app/users/<id>` (their active set)
    - just an emote ID, or a GIF/PNG/WebP from your PC (**Open file**)
-2. Pick how to cut it:
-   - **None**: one emote.
-   - **Auto**: wide emotes become square pieces.
-   - **Grid**: choose the pieces yourself, for example 2 wide × 2 tall.
+2. Check the cut. **Auto** picks how many square pieces the emote needs, so each piece is one full-height square. For example, the 384×112 emote [OdaMeeting](https://7tv.app/emotes/01FD667N200009ZAD9VPCVD4JX) becomes 4 pieces, `:OdaMeeting1:` to `:OdaMeeting4:`. The preview shows every piece separately with its name under it. To choose the pieces yourself, use the **Wide / Tall** buttons, and press **Auto** to go back.
 3. Pick how it fits:
-   - **Pad**: adds transparent edges.
+   - **Fill** (default): fills each piece edge to edge.
+   - **Stretch**: always stretches.
+   - **Bars**: adds transparent bars.
    - **Crop**: trims the edges.
-   - **Stretch**: distorts the image to fill.
 4. Press **Save for Discord**.
    - With a set loaded, tick the emotes you want and press **Save selected**. With nothing ticked, the button says **Save all** and saves the whole set.
 5. Upload the pieces to your server (Server Settings → Emoji), then press **Copy** and paste the text into Discord.
@@ -53,7 +51,7 @@ The full history is in [CHANGELOG.md](CHANGELOG.md).
 ## What it does to the files
 
 - **Animated emotes become GIF and static emotes become PNG.** These are the formats Discord accepts for emoji.
-- If a piece would be over 256 KB, the tool lowers quality step by step until it fits: first fewer colours, then a smaller size, then fewer frames. Every piece of one emote gets the same settings, so the pieces stay in sync when they animate.
+- If a piece would be over 256 KB, the tool keeps **every frame** and shrinks the piece size first, down to 96, 72, 64 or 48 px. Discord never shows an emote bigger than 48 px, so this still looks sharp. Frames are only dropped as a last resort. For video-like emotes it stores only what changes between frames, which leaves room for more pixels. Every piece of one emote gets the same settings, so the pieces stay in sync.
 - Names follow Discord's rules: letters, numbers and `_`, 2 to 32 characters.
 - For cut emotes, each emote gets its own folder with the pieces and a `NAME_paste.txt`.
 
