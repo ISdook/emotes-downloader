@@ -37,6 +37,7 @@ Other files:
 - `tools/release_notes.py` – prints `__version__` or a CHANGELOG section. Used by the workflow.
 - `run.bat`, `build_exe.bat`, `requirements.txt` – for running from source and building locally on Windows.
 - `assets/` – `icon.png`, `icon.ico`, `tray.png`.
+- `backend/` – the Cloudflare Worker at https://emotes-downloader.isdook.workers.dev (public bot, "Log in with Discord", dashboard website, `/emote` command). `src/index.js` (API, login, permission checks), `src/web/` (dashboard page, CSS, browser JS bundled as text), `migrations/` (D1 SQL), `scripts/setup-discord.mjs` (registers commands, interactions URL, bot name/picture). Deployed by `.github/workflows/backend.yml` on every push that touches `backend/`. Cloudflare account `386862aca310d121c9694051718d8a85`, Discord app `1575959367180881950`. Secrets live only in GitHub repo secrets (`CLOUDFLARE_API_TOKEN`, `DISCORD_BOT_TOKEN`, `DISCORD_CLIENT_SECRET`) and the Worker; never in code.
 
 Dependencies: Python 3.12, Pillow, customtkinter, pystray, tkinterdnd2. PyInstaller only for builds.
 
@@ -74,6 +75,17 @@ The owner (ISdook) has given standing permission to publish releases without ask
 
 ## Discord feature rules (from the owner)
 
+Two modes (Settings → Discord, `cfg["discord_mode"]`): **public** (default: `PublicLink`, Log in with Discord, the shared bot through the backend) and **own** (Advanced: `DiscordLink`, the user's own bot). `App.discord` returns the one in use.
+
+Public bot / backend rules (non-negotiable):
+- The bot token and client secret never go in the app. The app only sends its session token (Bearer) to the backend.
+- The client never gets the bot's server list. `/api/guilds` returns only the user's servers: **ready** (bot in + Administrator / Manage Expressions / Create Expressions) and **invite** (bot not in + Administrator / Manage Server).
+- Every server action re-checks live, with the bot, that the user is in that server and has the permission (`authorize()`); 403 otherwise. Never trust a guild_id alone.
+- Logout deletes the session, revokes the Discord token and clears cached lists. Session tokens are stored only hashed; Discord tokens only AES-GCM encrypted.
+- Desktop login: `/auth/app?state&challenge` → Discord → `/auth/callback` → one-time ticket to `http://127.0.0.1:53682/callback` → `/auth/redeem` with the verifier.
+- Test the backend with `wrangler dev` against a fake Discord (see `tests/backend` in earlier sessions: `fake.mjs`, `run.mjs`).
+
+Own-bot mode:
 - Each user creates their own bot in the Developer Portal. Linking needs only the bot token: `DiscordLink.link()` finds the app ID and owner from it. Logging in with Discord (OAuth, redirect `http://127.0.0.1:53682/callback`) is optional and only adds servers without the bot to the list.
 - The bot must stay private to its owner:
   - `guard()` runs before every send. It checks that Public Bot is off, that the user is the owner, and that the server is the user's own with emoji permission.

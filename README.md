@@ -126,6 +126,27 @@ Pick a server and press **Send**. The emotes go one by one, and each gets a ✓ 
 
 If Discord asks the app to slow down, it waits and shows a countdown. Press **Stop** any time. Afterwards **Send** only sends the ones that aren't added yet, so you can fix a name or pick another server and press it again.
 
+### Log in with Discord (one click)
+
+Open **Settings → Discord** (or press **Discord settings** under **Send to Discord**) and press **Log in with Discord**. Your browser opens Discord's login page: press **Authorize** and you're done. There's no bot to set up.
+
+- The public bot **ISdook - emotes downloader** adds the emotes. It can only add and manage emojis and stickers.
+- You only see your own servers: servers where the bot is (ready to send) and servers where you can invite it (dark, with an **Invite bot** button that opens right on that server).
+- The Emotes Downloader server checks your permission in that server for every single emote, so nobody can use the bot on a server that isn't theirs.
+- **Switch account** and **Log out** are in the same place.
+
+### Dashboard website and /emote command
+
+You don't even need the app for quick ones:
+- **Website:** [emotes-downloader.isdook.workers.dev](https://emotes-downloader.isdook.workers.dev). Log in with Discord, pick a server, paste a 7TV link or drop image files. You can also see all the server's emojis and free slots, rename or delete emojis, and see who added what.
+- **In Discord:** type `/emote add` and paste a 7TV link (you need the Manage Expressions or Create Expressions permission).
+
+For cutting wide emotes into pieces, shrinking big ones, stickers and big batches, use the app.
+
+### Advanced: use your own bot instead
+
+Prefer a bot that only you control? Choose **My own bot (Advanced)** at the top of **Settings → Discord** and follow the steps there:
+
 ### Set up your private bot (once, about 2 minutes)
 
 Discord doesn't let apps add emojis for a normal account login, so the app uses a bot that you create. The bot is yours alone: no other user can invite it, use it or see it in their app. You don't need to host anything: the app sends the emotes itself, so the bot only works while the app is open.
@@ -212,7 +233,7 @@ Everything runs on your PC. The app only connects to:
 - **7TV**, to find and download emotes
 - **GitHub**, to check for updates
 - **PyPI**, only if you choose to download video support
-- **Discord**, only if you set up Send to Discord, and only when you press Send. Emotes go straight from your PC to your server, with no server in between
+- **Discord and the Emotes Downloader server** (`emotes-downloader.isdook.workers.dev`), only if you log in with Discord, and only for the servers and emotes you choose. With **My own bot (Advanced)**, emotes go straight from your PC to Discord instead. The website's [privacy policy](https://emotes-downloader.isdook.workers.dev/privacy) says what it stores
 
 Your bot token and Discord login are stored encrypted on your PC (Windows DPAPI). Your other files are never uploaded anywhere.
 
