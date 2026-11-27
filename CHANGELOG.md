@@ -2,6 +2,12 @@
 
 Every release gets an entry here. The release build fails without one, and the text becomes the GitHub release notes and the app's "What's new" window.
 
+## v1.4.0 — 2026-11-27
+- New tray panel in the same style as Plume and LiteDock: click the tray icon (left or right) to open it
+- Shows the app's status, the last copied 7TV emote with a one-click Save, and quick actions (Browse 7TV, open the emotes folder, Settings)
+- The update row shows "Up to date", a "New" badge when an update is ready, or the download progress
+- Open app and Exit buttons; the panel slides in next to the taskbar and closes when you click away
+
 ## v1.3.0 — 2026-11-27
 - New **Browse 7TV** window: search 7TV, or look through Trending, Top and New, right inside the app. Press ⬇ Save on any emote and it's saved straight away with your cut settings
 - Copy any emote link on 7tv.app and the app notices it: a bar pops up with **Save now**

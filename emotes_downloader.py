@@ -36,7 +36,7 @@ except ImportError:  # pragma: no cover
     print("Pillow is missing. Install it with:  python -m pip install pillow")
     sys.exit(1)
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 UA = f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) emotes-downloader/{__version__}"
 GITHUB_REPO = "ISdook/emotes-downloader"
 PORTABLE_ASSET = "Emotes-Downloader-Portable.exe"
@@ -886,6 +886,7 @@ def run_gui():
     class App:
         def __init__(self, root):
             self.root = root
+            root._emotes_app = self  # handy for tests and debugging
             self.cfg = load_config()
             self.q = queue.Queue()
             self.items = []
@@ -898,6 +899,11 @@ def run_gui():
             self.update_info = None
             self.log_lines = []
             self.tray = None
+            self.flyout = None
+            self._flyout_closed = 0.0
+            self.upd_state = "idle"   # idle | checking | uptodate | available | downloading | error
+            self.upd_progress = 0
+            self.saved_count = 0
             self.toasts = []
             self.browse_win = None
             self.thumb_cache = {}
@@ -1720,6 +1726,7 @@ def run_gui():
                 self.toast(f"Couldn't save {ref.name}", str(err), "err")
             else:
                 n = len(res["files"])
+                self.saved_count += 1
                 self.last_out = res["folder"]
                 self.log_lines.append(f"  ✔ {ref.name}: {n} file(s) → {res['folder']}")
                 self.toast(f"Saved {ref.name}", (f"{n} pieces" if n > 1 else res["files"][0][0].name) +
@@ -2008,13 +2015,341 @@ def run_gui():
                     pystray.Menu.SEPARATOR,
                     M("Check for updates", lambda: self.ui(lambda: (self.show_window(), self.check_updates(True)))),
                     M("Quit", lambda: self.ui(self.quit_app)))
-                self.tray = pystray.Icon("EmotesDownloader", img, f"Emotes Downloader v{__version__}", menu)
+                app = self
+
+                class TrayIcon(pystray.Icon):
+                    """On Windows, clicking the tray icon opens our own flyout instead of the plain menu."""
+                    def _on_notify(self, wparam, lparam):
+                        if lparam in (0x0202, 0x0205):  # WM_LBUTTONUP / WM_RBUTTONUP
+                            try:
+                                import ctypes
+                                from ctypes import wintypes
+                                pt = wintypes.POINT()
+                                ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+                                app.ui(lambda x=pt.x, y=pt.y: app.toggle_flyout(x, y))
+                                return
+                            except Exception:
+                                pass
+                        return super()._on_notify(wparam, lparam)
+
+                self.tray = TrayIcon("EmotesDownloader", img, f"Emotes Downloader v{__version__}", menu)
                 self.tray.run_detached()
             except Exception as e:  # noqa  (no tray on this system: the app works without it)
                 self.tray = None
                 self.log_lines.append(f"Tray icon not available: {e!r}")
 
+
+        # ================= tray flyout (same look as Plume / LiteDock) =================
+        FL = dict(bg="#13151E", panel="#1A1D2A", hover="#242840", press="#2E2858", line="#262A3B",
+                  edge="#2E3348", text="#E8EAF2", muted="#8A91A6", dim="#5C6378", accent="#7C5CFF",
+                  accent_hi="#9479FF", accent_press="#6A4BEB", chip="#1F2333", green="#34D399",
+                  amber="#FBBF24", red="#F87171", red_bg="#2C2030", tint="#1F1B3A")
+
+        def _icon_font(self):
+            if not hasattr(self, "_icfont"):
+                import tkinter.font as tkfont
+                fams = set(tkfont.families(self.root))
+                self._icfont = next((f for f in ("Segoe Fluent Icons", "Segoe MDL2 Assets") if f in fams), None)
+            return self._icfont
+
+        def _glyph(self, name):
+            # Segoe Fluent Icons / MDL2 code points, with plain fallbacks for other systems
+            win = {"search": "", "paste": "", "folder": "", "settings": "",
+                   "sync": "", "download": "", "open": "", "power": "", "check": ""}
+            plain = {"search": "⌕", "paste": "⎘", "folder": "▤", "settings": "⚙", "sync": "↻", "download": "↓",
+                     "open": "↗", "power": "⏻", "check": "✓"}
+            return (win if self._icon_font() else plain)[name]
+
+        def toggle_flyout(self, x=None, y=None):
+            if self.flyout is not None and self.flyout.winfo_exists():
+                self.close_flyout()
+                return
+            if time.time() - self._flyout_closed < 0.3:  # the click that just closed it (focus moved to the tray)
+                return
+            self.open_flyout(x, y)
+
+        def close_flyout(self):
+            if self.flyout is not None:
+                try:
+                    self.flyout.destroy()
+                except Exception:
+                    pass
+            self.flyout = None
+            self._flyout_closed = time.time()
+
+        def _flyout_refresh(self):
+            if self.flyout is not None and self.flyout.winfo_exists():
+                x, y = self._flyout_anchor
+                self.close_flyout()
+                self._flyout_closed = 0
+                self.open_flyout(x, y, animate=False)
+
+        def _work_area(self, x, y):
+            try:
+                import ctypes
+                from ctypes import wintypes
+
+                class MONITORINFO(ctypes.Structure):
+                    _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT),
+                                ("rcWork", wintypes.RECT), ("dwFlags", wintypes.DWORD)]
+                mon = ctypes.windll.user32.MonitorFromPoint(wintypes.POINT(x, y), 2)
+                mi = MONITORINFO()
+                mi.cbSize = ctypes.sizeof(mi)
+                ctypes.windll.user32.GetMonitorInfoW(mon, ctypes.byref(mi))
+                w = mi.rcWork
+                return w.left, w.top, w.right, w.bottom
+            except Exception:
+                sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+                return 0, 0, sw, sh - 48
+
+        def open_flyout(self, x=None, y=None, animate=True):
+            L = self.FL
+            if x is None:
+                x, y = self.root.winfo_pointerxy()
+            self._flyout_anchor = (x, y)
+            try:
+                scale = ctk.ScalingTracker.get_widget_scaling(self.root)
+            except Exception:
+                scale = 1.0
+            ic = self._icon_font()
+            ICF = (ic, 13) if ic else (FAMILY, 13)
+            win = tk.Toplevel(self.root)
+            win.withdraw()
+            win.overrideredirect(True)
+            win.attributes("-topmost", True)
+            win.configure(bg=L["edge"])
+            self.flyout = win
+            frame = ctk.CTkFrame(win, fg_color=L["bg"], corner_radius=0, border_width=0)
+            frame.pack(fill="both", expand=True, padx=1, pady=1)
+            body = ctk.CTkFrame(frame, fg_color="transparent", width=288)
+            body.pack(fill="both", expand=True, padx=8, pady=8)
+
+            def hoverable(f, parts, on_click, base, hot, icon_lbl=None, icon_hot=None, icon_base=None,
+                          text_lbl=None, text_hot=None, text_base=None):
+                def enter(_e=None):
+                    f.configure(fg_color=hot)
+                    if icon_lbl is not None and icon_hot:
+                        icon_lbl.configure(text_color=icon_hot)
+                    if text_lbl is not None and text_hot:
+                        text_lbl.configure(text_color=text_hot)
+
+                def leave(_e=None):
+                    wx, wy = f.winfo_pointerxy()
+                    under = f.winfo_containing(wx, wy)
+                    if under is not None and str(under).startswith(str(f)):
+                        return
+                    f.configure(fg_color=base)
+                    if icon_lbl is not None and icon_base:
+                        icon_lbl.configure(text_color=icon_base)
+                    if text_lbl is not None and text_base:
+                        text_lbl.configure(text_color=text_base)
+
+                def press(_e=None):
+                    f.configure(fg_color=L["press"] if base != L["accent"] else L["accent_press"])
+
+                def click(_e=None):
+                    self.close_flyout()
+                    on_click()
+                for w in [f] + parts:
+                    w.bind("<Enter>", enter)
+                    w.bind("<Leave>", leave)
+                    w.bind("<ButtonPress-1>", press)
+                    w.bind("<ButtonRelease-1>", click)
+                    try:
+                        w.configure(cursor="hand2")
+                    except Exception:
+                        pass
+
+            def row(icon, text, cmd, right=None, right_color=None, badge=None, tint=None, enabled=True):
+                base = tint or L["bg"]
+                f = ctk.CTkFrame(body, fg_color=base, corner_radius=9, height=36)
+                f.pack(fill="x", pady=1)
+                f.pack_propagate(False)
+                il = ctk.CTkLabel(f, text=self._glyph(icon), font=ICF, width=22,
+                                  text_color=L["accent_hi"] if tint else L["muted"])
+                il.pack(side="left", padx=(14, 10))
+                tl = ctk.CTkLabel(f, text=text, font=ctk.CTkFont(family=FAMILY, size=13),
+                                  text_color=L["text"] if enabled else L["dim"], anchor="w")
+                tl.pack(side="left", fill="x", expand=True)
+                parts = [il, tl]
+                if badge:
+                    b = ctk.CTkLabel(f, text=badge, font=ctk.CTkFont(family=FAMILY, size=11, weight="bold"),
+                                     text_color="white", fg_color=L["accent"], corner_radius=9, width=40, height=18)
+                    b.pack(side="right", padx=12)
+                    parts.append(b)
+                elif right:
+                    rl = ctk.CTkLabel(f, text=right, font=ctk.CTkFont(family=FAMILY, size=11),
+                                      text_color=right_color or L["dim"])
+                    rl.pack(side="right", padx=12)
+                    parts.append(rl)
+                if enabled and cmd:
+                    hoverable(f, parts, cmd, base, L["hover"], il, L["accent_hi"], il.cget("text_color"))
+                return f
+
+            # header card: logo, name + version, status line
+            hc = ctk.CTkFrame(body, fg_color=L["panel"], corner_radius=10, height=58)
+            hc.pack(fill="x", pady=(0, 6))
+            hc.pack_propagate(False)
+            try:
+                logo = Image.open(resource_path("assets/icon.png"))
+                self._fly_logo = ctk.CTkImage(logo, logo, size=(30, 30))
+                ctk.CTkLabel(hc, text="", image=self._fly_logo, width=30).pack(side="left", padx=(12, 10))
+            except Exception:
+                pass
+            who = ctk.CTkFrame(hc, fg_color="transparent")
+            who.pack(side="left", fill="x", expand=True)
+            nm = ctk.CTkFrame(who, fg_color="transparent")
+            nm.pack(anchor="w")
+            ctk.CTkLabel(nm, text="Emotes Downloader", font=ctk.CTkFont(family=FAMILY, size=13, weight="bold"),
+                         text_color=L["text"], height=18).pack(side="left")
+            ctk.CTkLabel(nm, text=f"  v{__version__}", font=ctk.CTkFont(family=FAMILY, size=11),
+                         text_color=L["muted"], height=18).pack(side="left")
+            if self.busy:
+                sub, dot = (self.status.cget("text") or "Working…"), L["amber"]
+            elif self.upd_state == "available" and self.update_info:
+                sub, dot = f"Update v{self.update_info['version']} is ready", L["accent_hi"]
+            else:
+                done = f" · {self.saved_count} saved" if self.saved_count else ""
+                where = SAVE_PRESETS.get(self.cfg.get("save_preset", "app"), "App folder").replace("…", "")
+                sub, dot = f"Ready · {where}{done}", L["green"]
+            sl = ctk.CTkFrame(who, fg_color="transparent")
+            sl.pack(anchor="w")
+            ctk.CTkLabel(sl, text="●", font=ctk.CTkFont(family=FAMILY, size=9), text_color=dot, width=10,
+                         height=16).pack(side="left", padx=(0, 5))
+            ctk.CTkLabel(sl, text=sub if len(sub) <= 32 else sub[:31] + "…", font=ctk.CTkFont(family=FAMILY, size=11),
+                         text_color=L["muted"], height=16).pack(side="left")
+
+            # copied-link card
+            if self.clip_ref is not None:
+                cc = ctk.CTkFrame(body, fg_color=L["tint"], corner_radius=10, height=50)
+                cc.pack(fill="x", pady=(0, 6))
+                cc.pack_propagate(False)
+                if getattr(self, "_banner_ctk", None) is not None:
+                    ctk.CTkLabel(cc, text="", image=self._banner_ctk, width=40).pack(side="left", padx=(12, 8))
+                tx = ctk.CTkFrame(cc, fg_color="transparent")
+                tx.pack(side="left", fill="x", expand=True, padx=(0 if getattr(self, "_banner_ctk", None) else 12, 0))
+                ctk.CTkLabel(tx, text="Copied from 7TV", font=ctk.CTkFont(family=FAMILY, size=10),
+                             text_color=L["muted"], height=14, anchor="w").pack(anchor="w")
+                ctk.CTkLabel(tx, text=self.clip_ref.name, font=ctk.CTkFont(family=FAMILY, size=13, weight="bold"),
+                             text_color=L["text"], height=18, anchor="w").pack(anchor="w")
+                sv = ctk.CTkFrame(cc, fg_color=L["accent"], corner_radius=8, height=30, width=74)
+                sv.pack(side="right", padx=10)
+                sv.pack_propagate(False)
+                sl1 = ctk.CTkLabel(sv, text=f"{self._glyph('download')}  Save", font=ctk.CTkFont(family=FAMILY, size=12, weight="bold"),
+                                   text_color="white")
+                sl1.pack(expand=True)
+                hoverable(sv, [sl1], self.on_clip_save, L["accent"], L["accent_hi"])
+
+            row("search", "Browse 7TV", lambda: (self.show_window(), self.open_browser()))
+            row("paste", "Save copied 7TV link", self.save_clipboard_link)
+            row("folder", "Open emotes folder", lambda: self.on_open_out(True),
+                right=SAVE_PRESETS.get(self.cfg.get("save_preset", "app"), "").replace("…", ""))
+            row("settings", "Settings", lambda: (self.show_window(), self.open_settings()))
+            ctk.CTkFrame(body, fg_color=L["line"], height=1, corner_radius=0).pack(fill="x", padx=6, pady=6)
+
+            st = self.upd_state
+            if st == "available" and self.update_info:
+                row("download", f"Update to v{self.update_info['version']}", lambda: self.start_update(self.update_info),
+                    badge="New", tint=L["tint"])
+            elif st == "checking":
+                row("sync", "Checking for updates…", None, enabled=False)
+            elif st == "downloading":
+                row("download", "Downloading the update…", None, right=f"{self.upd_progress}%",
+                    right_color=L["accent_hi"], enabled=False)
+            else:
+                row("sync", "Check for updates", lambda: self.check_updates(manual=True),
+                    right={"uptodate": "Up to date", "error": "Couldn't check"}.get(st),
+                    right_color=L["green"] if st == "uptodate" else L["red"])
+
+            # footer: Open + Exit
+            ft = ctk.CTkFrame(body, fg_color="transparent", height=38)
+            ft.pack(fill="x", pady=(8, 0))
+            ft.pack_propagate(False)
+            def pill(parent, icon, text, bold, fg, tc):
+                f = ctk.CTkFrame(parent, fg_color=fg, corner_radius=9)
+                inner = ctk.CTkFrame(f, fg_color="transparent")
+                inner.place(relx=0.5, rely=0.5, anchor="center")
+                il = ctk.CTkLabel(inner, text=self._glyph(icon), font=ICF, text_color=tc, width=16)
+                il.pack(side="left", padx=(0, 7))
+                tl = ctk.CTkLabel(inner, text=text, font=ctk.CTkFont(family=FAMILY, size=13, weight="bold" if bold else "normal"),
+                                  text_color=tc)
+                tl.pack(side="left")
+                return f, [inner, il, tl], il, tl
+            ex, ex_parts, ei, et = pill(ft, "power", "Exit", False, L["chip"], L["text"])
+            ex.configure(width=86)
+            ex.pack(side="right", fill="y")
+            ex.pack_propagate(False)
+            op, op_parts, _, _ = pill(ft, "open", "Open app", True, L["accent"], "white")
+            op.pack(side="left", fill="both", expand=True, padx=(0, 6))
+            hoverable(op, op_parts, self.show_window, L["accent"], L["accent_hi"])
+            hoverable(ex, ex_parts, self.quit_app, L["chip"], L["red_bg"], ei, L["red"], L["text"], et, L["red"], L["text"])
+
+            # place it next to the taskbar, like Windows' own flyouts
+            win.update_idletasks()
+            pw = int(304 * scale)
+            ph = win.winfo_reqheight()
+            left, top, right, bottom = self._work_area(x, y)
+            gap = int(12 * scale)
+            fx = max(left + gap, min(x - pw // 2, right - pw - gap))
+            if y >= bottom - 4:          # taskbar at the bottom (the usual)
+                fy, d = bottom - ph - gap, 1
+            elif y <= top + 4:           # taskbar at the top
+                fy, d = top + gap, -1
+            else:                        # side taskbar / auto-hide
+                fy, d = max(top + gap, min(y - ph + gap * 2, bottom - ph - gap)), 1
+                fx = right - pw - gap if x > (left + right) // 2 else left + gap
+            win.geometry(f"{pw}x{ph}+{fx}+{fy + (10 * d if animate else 0)}")
+            win.deiconify()
+            self._round_corners(win)
+            win.lift()
+            win.focus_force()
+            win.bind("<Escape>", lambda _e: self.close_flyout())
+
+            def lost(_e=None):
+                def check():
+                    if self.flyout is not win:
+                        return
+                    f = win.focus_get()
+                    if f is None or not str(f).startswith(str(win)):
+                        self.close_flyout()
+                win.after(120, check)
+            win.bind("<FocusOut>", lost)
+            if animate:
+                try:
+                    win.attributes("-alpha", 0.0)
+                except Exception:
+                    pass
+
+                def step(i=1, n=8):
+                    if self.flyout is not win:
+                        return
+                    k = 1 - (1 - i / n) ** 3   # ease-out
+                    win.geometry(f"+{fx}+{fy + int(round(10 * d * (1 - k)))}")
+                    try:
+                        win.attributes("-alpha", k)
+                    except Exception:
+                        pass
+                    if i < n:
+                        win.after(15, step, i + 1, n)
+                step()
+
+        def _round_corners(self, win):
+            """Windows 11: rounded corners + a subtle border colour, like the system flyouts."""
+            if not sys.platform.startswith("win"):
+                return
+            try:
+                import ctypes
+                hwnd = ctypes.windll.user32.GetParent(win.winfo_id()) or win.winfo_id()
+                pref = ctypes.c_int(2)  # DWMWCP_ROUND
+                ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(pref), 4)
+                edge = self.FL["edge"].lstrip("#")
+                color = ctypes.c_uint(int(edge[4:6] + edge[2:4] + edge[0:2], 16))  # COLORREF is 0x00BBGGRR
+                ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 34, ctypes.byref(color), 4)
+            except Exception:
+                pass
+
         def show_window(self):
+            self.close_flyout()
             self.root.deiconify()
             self.root.lift()
             try:
@@ -2037,6 +2372,7 @@ def run_gui():
                 self.quit_app()
 
         def quit_app(self):
+            self.close_flyout()
             try:
                 if self.tray:
                     self.tray.stop()
@@ -2072,6 +2408,8 @@ def run_gui():
                 self.check_updates(manual=True)
 
         def check_updates(self, manual):
+            self.upd_state = "checking"
+            self._flyout_refresh()
             self._set_update_btn("Checking…")
             self.update_btn.configure(state="disabled")
 
@@ -2085,6 +2423,8 @@ def run_gui():
 
         def _update_checked(self, info, err, manual):
             self.update_btn.configure(state="normal")
+            self.upd_state = "error" if err else ("available" if info else "uptodate")
+            self._flyout_refresh()
             if err:
                 self._set_update_btn("Check for updates")
                 if manual:
@@ -2116,8 +2456,14 @@ def run_gui():
                 return
             self.update_btn.configure(state="disabled")
 
+            self.upd_state, self.upd_progress = "downloading", 0
+
             def prog(p):
-                self.ui(lambda: self._set_update_btn(f"Downloading {int(p * 100)}%", "accent"))
+                def show():
+                    self.upd_progress = int(p * 100)
+                    self._set_update_btn(f"Downloading {self.upd_progress}%", "accent")
+                    self._flyout_refresh()
+                self.ui(show)
 
             def done(_):
                 self.say("Update downloaded. Restarting…", "ok")
@@ -2127,8 +2473,12 @@ def run_gui():
                 try:
                     apply_update(info, prog)
                 except Exception:
-                    self.ui(lambda: (self.update_btn.configure(state="normal"),
-                                     self._set_update_btn(f"⬇  Update to v{info['version']}", "accent")))
+                    def back():
+                        self.upd_state = "available"
+                        self.update_btn.configure(state="normal")
+                        self._set_update_btn(f"⬇  Update to v{info['version']}", "accent")
+                        self._flyout_refresh()
+                    self.ui(back)
                     raise
             self.work(job, done, f"Downloading v{info['version']} from GitHub…")
 

@@ -49,7 +49,7 @@ The full history is in [CHANGELOG.md](CHANGELOG.md).
    - With a set loaded, tick the emotes you want and press **Save selected**. With nothing ticked, the button says **Save all**.
 6. Upload the pieces to your server (Server Settings → Emoji), then press **Copy** and paste the text into Discord.
 
-**Tray icon:** when you close the window, the app keeps running in the system tray by default. Right-click the tray icon for Browse 7TV, Save copied 7TV link, Open emotes folder, Check for updates, and Quit. You can turn this off in **⚙ Settings**, along with the piece size, keeping the original file, the copied-link notice, and the update options.
+**Tray icon:** when you close the window, the app keeps running in the system tray by default. Click the tray icon (left or right) to open the tray panel. It shows the app's status and the last copied 7TV emote with a **Save** button, plus Browse 7TV, Open emotes folder, Settings, Check for updates, **Open app** and **Exit**. You can turn this off in **⚙ Settings**, along with the piece size, keeping the original file, the copied-link notice, and the update options.
 
 ## What it does to the files
 
