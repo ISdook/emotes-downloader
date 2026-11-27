@@ -71,6 +71,7 @@ It runs on Windows 10 and 11 (64-bit).
    - **App folder** (default): an `Emotes` folder next to the app.
    - **Downloads**, **Pictures** or **Desktop**.
    - **Custom folder…**: any folder you pick.
+   - The Files list handles thousands of files. Use ↑ ↓ to go through them, Space to tick, Delete to remove and Ctrl+A to tick all. Shift+click a box to tick a range.
 6. **Press Save.**
    - With several files in the list, **Save all** saves them all.
    - If you tick some, it becomes **Save selected** and saves only those.

@@ -39,7 +39,7 @@ except ImportError:  # pragma: no cover
     print("Pillow is missing. Install it with:  python -m pip install pillow")
     sys.exit(1)
 
-__version__ = "1.8.5"
+__version__ = "1.9.0"
 UA = f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) emotes-downloader/{__version__}"
 GITHUB_REPO = "ISdook/emotes-downloader"
 PORTABLE_ASSET = "Emotes-Downloader-Portable.exe"
@@ -628,7 +628,7 @@ def load_any(path):
     return load_frames(path.read_bytes())
 
 
-def collect_media(paths, videos=True, limit=500):
+def collect_media(paths, videos=True, limit=50000):
     """Expand dropped files/folders into a list of media files."""
     ok = MEDIA_EXT if videos else IMAGE_EXT
     out = []
@@ -1920,6 +1920,7 @@ def run_gui(start_hidden=False):
     ctk = _import_ctk()
     import tkinter as tk
     from tkinter import filedialog
+    import tkinter.font as tkfont
     from PIL import ImageTk, ImageDraw
     try:
         import PIL._tkinter_finder  # noqa: F401  (makes PyInstaller bundle it; ImageTk needs it)
@@ -1951,6 +1952,215 @@ def run_gui(start_hidden=False):
             except Exception:
                 pass
         win.after(250, apply)  # after CustomTkinter sets its own icon
+
+    class FastList:
+        """The Files list, drawn on one canvas: only the rows you can see are drawn, so 1000s of files stay
+        instant. Click a name to open it, click the box to tick it (Shift+click ticks a range).
+        Keys: Up/Down/Home/End move, Space ticks, Delete removes, Ctrl+A ticks all."""
+
+        def __init__(self, parent, on_select, on_check, on_delete=None):
+            try:
+                S = ctk.ScalingTracker.get_widget_scaling(parent)
+            except Exception:
+                S = 1.0
+            self.px = px = lambda v: int(round(v * S))  # noqa: E731
+            self.RH = px(32)
+            self.names, self.checked, self.sel, self.hover, self.anchor = [], set(), None, None, None
+            self.on_select, self.on_check, self.on_delete = on_select, on_check, on_delete
+            self.font = tkfont.Font(family=FAMILY, size=-px(13))
+            self._fit_cache = {}
+            self.frame = ctk.CTkFrame(parent, fg_color="transparent")
+            self.frame.grid_rowconfigure(0, weight=1)
+            self.frame.grid_columnconfigure(0, weight=1)
+            self.cv = cv = tk.Canvas(self.frame, bg=C["field"], highlightthickness=0, bd=0, takefocus=1)
+            cv.grid(row=0, column=0, sticky="nsew")
+            self.sb = ctk.CTkScrollbar(self.frame, command=self._yview, button_color=C["card_hi"],
+                                       button_hover_color=C["border"], width=12)
+            self.sb.grid(row=0, column=1, sticky="ns", padx=(2, 0))
+            cv.configure(yscrollcommand=self._on_scroll)
+            self.tick = ImageTk.PhotoImage(draw_icon("check", "#ffffff", px(12)))
+            cv.bind("<Configure>", lambda _e: self.redraw())
+            cv.bind("<Button-1>", self._click)
+            cv.bind("<Shift-Button-1>", lambda e: self._click(e, shift=True))
+            cv.bind("<Motion>", self._motion)
+            cv.bind("<Leave>", lambda _e: self._set_hover(None))
+            cv.bind("<MouseWheel>", lambda e: self._wheel(-1 if e.delta > 0 else 1, abs(e.delta)))
+            cv.bind("<Button-4>", lambda _e: self._wheel(-1, 120))
+            cv.bind("<Button-5>", lambda _e: self._wheel(1, 120))
+            for key, fn in (("<Up>", lambda: self._step(-1)), ("<Down>", lambda: self._step(1)),
+                            ("<Prior>", lambda: self._step(-10)), ("<Next>", lambda: self._step(10)),
+                            ("<Home>", lambda: self._step(-10 ** 9)), ("<End>", lambda: self._step(10 ** 9)),
+                            ("<space>", self._space), ("<Delete>", lambda: self.on_delete and self.on_delete()),
+                            ("<Control-a>", lambda: self.check_all(len(self.checked) < len(self.names)))):
+                cv.bind(key, lambda _e, fn=fn: (fn(), "break")[1])
+
+        def grid(self, **kw):
+            self.frame.grid(**kw)
+
+        # --- data
+        def set(self, names):
+            self.names = list(names)
+            self.checked = set()
+            self.sel = self.hover = self.anchor = None
+            self._fit_cache.clear()
+            self._region()
+            self.redraw()
+
+        def rename(self, i, name):
+            if 0 <= i < len(self.names):
+                self.names[i] = name
+                self._redraw_row(i)
+
+        def select(self, i, see=True):
+            old, self.sel = self.sel, i
+            for j in (old, i):
+                if j is not None:
+                    self._redraw_row(j)
+            if see and i is not None:
+                self.see(i)
+
+        def check_all(self, on):
+            self.checked = set(range(len(self.names))) if on else set()
+            self.redraw()
+            self.on_check()
+
+        # --- drawing
+        def _region(self):
+            self.cv.configure(scrollregion=(0, 0, 1, max(1, len(self.names) * self.RH + self.px(4))))
+
+        def _visible(self):
+            y0 = self.cv.canvasy(0)
+            first = max(0, int(y0 // self.RH))
+            last = min(len(self.names) - 1, int((y0 + self.cv.winfo_height()) // self.RH) + 1)
+            return first, last
+
+        def redraw(self):
+            self.cv.delete("row")
+            if not self.names:
+                return
+            first, last = self._visible()
+            for i in range(first, last + 1):
+                self._draw_row(i)
+
+        def _redraw_row(self, i):
+            self.cv.delete(f"r{i}")
+            first, last = self._visible()
+            if first <= i <= last and i < len(self.names):
+                self._draw_row(i)
+
+        def _fit(self, text, width):
+            key = (text, width)
+            if key not in self._fit_cache:
+                if self.font.measure(text) <= width:
+                    out = text
+                else:
+                    lo, hi = 0, len(text)
+                    while lo < hi:                      # longest start that fits with "…"
+                        mid = (lo + hi + 1) // 2
+                        if self.font.measure(text[:mid] + "…") <= width:
+                            lo = mid
+                        else:
+                            hi = mid - 1
+                    out = text[:lo] + "…"
+                self._fit_cache[key] = out
+            return self._fit_cache[key]
+
+        def _rrect(self, x1, y1, x2, y2, r, **kw):
+            pts = [x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r, x2, y2 - r, x2, y2, x2 - r, y2,
+                   x1 + r, y2, x1, y2, x1, y2 - r, x1, y1 + r, x1, y1]
+            return self.cv.create_polygon(pts, smooth=True, **kw)
+
+        def _draw_row(self, i):
+            px, cv, RH = self.px, self.cv, self.RH
+            w = max(10, cv.winfo_width())
+            y = i * RH
+            tags = ("row", f"r{i}")
+            if i == self.sel or i == self.hover:
+                self._rrect(px(2), y + px(1), w - px(2), y + RH - px(1), px(8), tags=tags,
+                            fill=C["card_hi"] if i == self.sel else C["card"], outline="")
+            bx, by, bs = px(10), y + (RH - px(18)) // 2, px(18)
+            if i in self.checked:
+                self._rrect(bx, by, bx + bs, by + bs, px(5), fill=C["accent"], outline="", tags=tags)
+                cv.create_image(bx + bs // 2, by + bs // 2, image=self.tick, tags=tags)
+            else:
+                self._rrect(bx, by, bx + bs, by + bs, px(5), fill="", outline=C["faint"], width=max(1, px(2)), tags=tags)
+            tx = bx + bs + px(10)
+            cv.create_text(tx, y + RH // 2, anchor="w", text=self._fit(self.names[i], w - tx - px(8)),
+                           fill=C["text"], font=self.font, tags=tags)
+
+        # --- scrolling
+        def _yview(self, *a):
+            self.cv.yview(*a)
+            self.redraw()
+
+        def _on_scroll(self, lo, hi):
+            self.sb.set(lo, hi)
+
+        def _wheel(self, direction, amount):
+            self.cv.yview_scroll(direction * max(1, int(amount / 120)) * 3, "units")
+            self.redraw()
+
+        def see(self, i):
+            y0, h = self.cv.canvasy(0), self.cv.winfo_height()
+            total = max(1, len(self.names) * self.RH + self.px(4))
+            top = i * self.RH
+            if top < y0:
+                self.cv.yview_moveto(top / total)
+            elif top + self.RH > y0 + h:
+                self.cv.yview_moveto((top + self.RH - h) / total)
+            else:
+                return
+            self.redraw()
+
+        # --- mouse / keys
+        def _index(self, e):
+            i = int(self.cv.canvasy(e.y) // self.RH)
+            return i if 0 <= i < len(self.names) else None
+
+        def _set_hover(self, i):
+            if i != self.hover:
+                old, self.hover = self.hover, i
+                for j in (old, i):
+                    if j is not None:
+                        self._redraw_row(j)
+
+        def _motion(self, e):
+            self._set_hover(self._index(e))
+
+        def _click(self, e, shift=False):
+            self.cv.focus_set()
+            i = self._index(e)
+            if i is None:
+                return
+            if e.x <= self.px(36):                      # the tick box
+                if shift and self.anchor is not None:
+                    lo, hi = sorted((self.anchor, i))
+                    on = i not in self.checked
+                    rng = set(range(lo, hi + 1))
+                    self.checked = (self.checked | rng) if on else (self.checked - rng)
+                    self.redraw()
+                else:
+                    self.checked ^= {i}
+                    self._redraw_row(i)
+                self.anchor = i
+                self.on_check()
+                return
+            self.anchor = i
+            self.select(i, see=False)
+            self.on_select(i)
+
+        def _step(self, d):
+            if not self.names:
+                return
+            i = 0 if self.sel is None else max(0, min(len(self.names) - 1, self.sel + d))
+            self.select(i)
+            self.on_select(i)
+
+        def _space(self):
+            if self.sel is not None:
+                self.checked ^= {self.sel}
+                self._redraw_row(self.sel)
+                self.on_check()
 
     class App:
         def __init__(self, root):
@@ -2131,10 +2341,9 @@ def run_gui(start_hidden=False):
             lw.grid(row=1, column=0, sticky="nsew", padx=12)
             lw.grid_rowconfigure(0, weight=1)
             lw.grid_columnconfigure(0, weight=1)
-            self.list_frame = ctk.CTkScrollableFrame(lw, fg_color="transparent",
-                                                     scrollbar_button_color=C["card_hi"],
-                                                     scrollbar_button_hover_color=C["border"])
-            self.list_frame.grid(row=0, column=0, sticky="nsew", padx=2, pady=4)
+            self.flist = FastList(lw, lambda i: self.select_item(i), lambda: self._update_save_all(),
+                                  lambda: self.em_remove())
+            self.flist.grid(row=0, column=0, sticky="nsew", padx=(6, 4), pady=6)
             self.em_empty = ctk.CTkFrame(lw, fg_color="transparent")
             ctk.CTkLabel(self.em_empty, text="", image=self.ico("download", C["faint"], 34)).pack(pady=(0, 10))
             self.label(self.em_empty, "Drop files here", 14, bold=True).pack()
@@ -2496,11 +2705,7 @@ def run_gui(start_hidden=False):
                 self.select_item(first)
 
         def _rebuild_rows(self):
-            for w in self.list_frame.winfo_children():
-                w.destroy()
-            self.rows = []
-            for i, it in enumerate(self.items):
-                self._add_row(i, it)
+            self.flist.set([it["name"] for it in self.items])
             n = len(self.items)
             self.side_title.configure(text=f"FILES · {n}" if n else "FILES")
             if n:
@@ -2539,9 +2744,7 @@ def run_gui(start_hidden=False):
             elif not self.items:
                 self.em_clear()
             else:
-                idx = self.items.index(self.current)
-                for j, (_, _, btn) in enumerate(self.rows):
-                    btn.configure(fg_color=C["card_hi"] if j == idx else "transparent")
+                self.flist.select(self.items.index(self.current))
             self.say(f"Removed {len(gone)} from the list.", "info")
 
         def em_clear(self):
@@ -2553,26 +2756,11 @@ def run_gui(start_hidden=False):
             self._set_buttons()
             self.refresh_preview()
 
-        def _add_row(self, i, it):
-            row = ctk.CTkFrame(self.list_frame, fg_color="transparent", corner_radius=8)
-            row.pack(fill="x", pady=1)
-            var = tk.BooleanVar(value=False)
-            ctk.CTkCheckBox(row, text="", variable=var, width=22, checkbox_width=18, checkbox_height=18,
-                            corner_radius=5, fg_color=C["accent"], hover_color=C["accent_hover"],
-                            border_color=C["faint"], command=self._update_save_all).pack(side="left", padx=(6, 2))
-            btn = ctk.CTkButton(row, text=it["name"], anchor="w", height=30, corner_radius=8,
-                                fg_color="transparent", hover_color=C["card_hi"], text_color=C["text"],
-                                font=self.F(13), command=lambda i=i: self.select_item(i))
-            btn.pack(side="left", fill="x", expand=True)
-            self.rows.append((row, var, btn))
-
         def on_check_all(self):
-            for _, var, _ in self.rows:
-                var.set(self.all_var.get())
-            self._update_save_all()
+            self.flist.check_all(bool(self.all_var.get()))
 
         def _checked(self):
-            return [self.items[i] for i, (_, var, _) in enumerate(self.rows) if var.get()]
+            return [self.items[i] for i in sorted(self.flist.checked) if i < len(self.items)]
 
         def _update_save_all(self):
             k = len(self._checked())
@@ -2593,23 +2781,78 @@ def run_gui(start_hidden=False):
             return it
 
         def select_item(self, idx):
+            if not 0 <= idx < len(self.items):
+                return
             it = self.items[idx]
-            for j, (_, _, btn) in enumerate(self.rows):
-                btn.configure(fg_color=C["card_hi"] if j == idx else "transparent")
+            self.flist.select(idx)
+            self._sel_gen = gen = getattr(self, "_sel_gen", 0) + 1
             if it["frames"] is not None:
+                self._remember_loaded(it)
                 self._show(it)
+                self._prefetch(idx)
                 return
             self.current = None
             self._set_buttons()
+            self.say(f"{'Downloading' if it['ref'] else 'Opening'} {it['name']}…", "busy")
 
-            def load():
+            def job():
                 try:
-                    return self.ensure_loaded(it)
+                    self.ensure_loaded(it)
+                    err = None
                 except NeedFFmpeg:
                     self.ui(lambda: self.ask_ffmpeg(lambda: self.select_item(idx)))
-                    raise
-            if not self.work(load, self._show, f"{'Downloading' if it['ref'] else 'Opening'} {it['name']}…"):
-                self.say("Busy, try again in a second.", "warn")
+                    return
+                except Exception as e:  # noqa
+                    err = e
+
+                def done():
+                    if gen != self._sel_gen:                 # you already clicked another file
+                        return
+                    if err:
+                        self.say(f"Couldn't open {it['name']}: {err}", "err")
+                        return
+                    self._remember_loaded(it)
+                    self._show(it)
+                    self._prefetch(idx)
+                self.ui(done)
+            self._loader().submit(job)
+
+        def _loader(self):
+            if getattr(self, "_load_pool", None) is None:
+                from concurrent.futures import ThreadPoolExecutor
+                self._load_pool = ThreadPoolExecutor(max_workers=max(2, min(8, (os.cpu_count() or 4))))
+            return self._load_pool
+
+        def _prefetch(self, idx):
+            """Open the next few files in the background, so going down the list is instant."""
+            for j in range(idx + 1, min(len(self.items), idx + 4)):
+                nxt = self.items[j]
+                if nxt["frames"] is None and nxt["path"] and not nxt.get("_loading"):
+                    nxt["_loading"] = True
+
+                    def job(nxt=nxt):
+                        try:
+                            self.ensure_loaded(nxt)
+                            self.ui(lambda: self._remember_loaded(nxt))
+                        except Exception:
+                            pass
+                        finally:
+                            nxt["_loading"] = False
+                    self._loader().submit(job)
+
+        def _remember_loaded(self, it, keep=40):
+            """Keep the frames of the last 40 files you looked at; older ones are freed (re-opened when needed),
+            so a list of 1000s of GIFs doesn't fill up your memory."""
+            from collections import OrderedDict
+            lru = getattr(self, "_lru", None)
+            if lru is None:
+                lru = self._lru = OrderedDict()
+            lru.pop(id(it), None)
+            lru[id(it)] = it
+            while len(lru) > keep:
+                _, old = lru.popitem(last=False)
+                if old is not self.current and not old.get("_loading"):
+                    old["frames"] = old["raw"] = None
 
         def _show(self, it):
             self.current = it
@@ -2626,9 +2869,10 @@ def run_gui(start_hidden=False):
             if getattr(self, "_name_lock", False) or self.current is None:
                 return
             self.current["name"] = self.name_var.get()
-            for (_, _, btn), it in zip(self.rows, self.items):
+            for i, it in enumerate(self.items):
                 if it is self.current:
-                    btn.configure(text=it["name"])
+                    self.flist.rename(i, it["name"])
+                    break
             self.update_texts()
 
         # ================= preview =================
@@ -2739,21 +2983,42 @@ def run_gui(start_hidden=False):
             keep = bool(self.cfg.get("keep_original"))
             self.remember()
 
+            def save_one(it):
+                was_loaded = it["frames"] is not None
+                try:
+                    self.ensure_loaded(it)
+                    res = make_emote(it["frames"], it["name"], out, s["mode"], s["cols"], s["rows"],
+                                     s["tile"], s["fit"], it["raw"] if keep else None, s["target"])
+                    self.log_lines.append(f"  OK      {it['name']}: {len(res['files'])} file(s), {res['note']}")
+                    return it, res
+                except Exception as e:  # noqa
+                    self.log_lines.append(f"  FAILED  {it['name']}: {e}")
+                    return it, None
+                finally:
+                    if not was_loaded and it is not self.current and len(targets) > 1:
+                        it["frames"] = it["raw"] = None      # free memory: 1000s of GIFs don't fit in RAM at once
+
             def job():
-                results = []
-                for i, it in enumerate(targets, 1):
-                    if len(targets) > 1:
-                        self.ui(lambda i=i, it=it: self.say(f"Saving {i}/{len(targets)}: {it['name']}…", "busy"))
-                    try:
-                        self.ensure_loaded(it)
-                        res = make_emote(it["frames"], it["name"], out, s["mode"], s["cols"], s["rows"],
-                                         s["tile"], s["fit"], it["raw"] if keep else None, s["target"])
-                        results.append((it, res))
-                        self.log_lines.append(f"  OK      {it['name']}: {len(res['files'])} file(s), {res['note']}")
-                    except Exception as e:  # noqa
-                        results.append((it, None))
-                        self.log_lines.append(f"  FAILED  {it['name']}: {e}")
-                return results
+                if len(targets) == 1:
+                    return [save_one(targets[0])]
+                # several at once (uses more of the PC, much faster). Files with the same name take turns.
+                from concurrent.futures import ThreadPoolExecutor
+                locks, guard, count = {}, threading.Lock(), [0]
+
+                def run(it):
+                    key = (it["name"] or "").lower()
+                    with guard:
+                        lk = locks.setdefault(key, threading.Lock())
+                    with lk:
+                        r = save_one(it)
+                    with guard:
+                        count[0] += 1
+                        k = count[0]
+                    if k == len(targets) or k % 5 == 0:
+                        self.ui(lambda k=k: self.say(f"Saving {k}/{len(targets)}…", "busy"))
+                    return r
+                with ThreadPoolExecutor(max_workers=max(2, min(8, (os.cpu_count() or 4)))) as pool:
+                    return list(pool.map(run, targets))
 
             def done(results):
                 ok = [r for _, r in results if r]
@@ -3677,11 +3942,29 @@ def run_gui(start_hidden=False):
             res = it.get("result")
             tail = {"ready": "", "loading": "  ·  loading…", "working": "  ·  converting…",
                     "error": "  ·  couldn't read"}.get(st, "")
-            if res is not None and st in ("done", "over", "ready"):
-                tail = f"  ·  {len(res['data']) // 1024} KB {res['ext'].upper()}" + ("  (over limit)" if res["over"] else "")
-                if st == "done":
+            summ = (len(res["data"]) // 1024, res["ext"], res["over"]) if res is not None else (
+                it.get("summary") if st in ("done", "over") else None)
+            if summ is not None and st in ("done", "over", "ready"):
+                tail = f"  ·  {summ[0]} KB {summ[1].upper()}" + ("  (over limit)" if summ[2] else "")
+                if st in ("done", "over"):
                     tail += "  ·  saved"
             return f"  {it['name']}{tail}"
+
+        def _conv_update_row(self, it):
+            """Redraw one file's line (fast, keeps the scroll position and the selection)."""
+            try:
+                i = next(k for k, x in enumerate(self.conv_items) if x is it)
+            except StopIteration:
+                return
+            was = i in self.conv_list.curselection()
+            top_ = self.conv_list.yview()[0]
+            self.conv_list.delete(i)
+            self.conv_list.insert(i, self._conv_line(it))
+            col = {"done": C["good"], "over": C["warn"], "error": C["bad"]}.get(it.get("status"))
+            self.conv_list.itemconfigure(i, fg=col or C["text"])
+            if was:
+                self.conv_list.selection_set(i)
+            self.conv_list.yview_moveto(top_)
 
         def _conv_refresh_list(self, keep_sel=False):
             sel = self.conv_list.curselection()
@@ -3833,7 +4116,7 @@ def run_gui(start_hidden=False):
                 ok = over = bad = 0
                 for k, it in enumerate(items, 1):
                     self.ui(lambda k=k, it=it: (self.say(f"Converting {k}/{len(items)}: {it['name']}", "busy"),
-                                                it.update(status="working"), self._conv_refresh_list(keep_sel=True)))
+                                                it.update(status="working"), self._conv_update_row(it)))
                     try:
                         if it["frames"] is None:
                             it["frames"] = load_any(it["path"])
@@ -3854,6 +4137,15 @@ def run_gui(start_hidden=False):
                         it["status"] = "error"
                         bad += 1
                         self.log_lines.append(f"  FAILED  {it['name']}: {e}")
+                    sel_ = self.conv_items[self.conv_sel] if self.conv_sel is not None and \
+                        self.conv_sel < len(self.conv_items) else None
+                    if it is not sel_ and len(items) > 1:     # free memory: 1000s of files don't fit in RAM at once
+                        r_ = it.get("result")
+                        if r_ is not None:
+                            it["summary"] = (len(r_["data"]) // 1024, r_["ext"], r_["over"])
+                        it["frames"] = None
+                        it["result"] = None
+                    self.ui(lambda it=it: self._conv_update_row(it))
                 return ok, over, bad
 
             def done(r_):

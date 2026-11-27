@@ -2,6 +2,17 @@
 
 Every release gets an entry here. The release build fails without one, and the text becomes the GitHub release notes and the app's "What's new" window.
 
+## v1.9.0 — 2026-11-27
+- Big folders: add 1000+ files at once. Before, only the first 500 were added
+- The Files list is instant with thousands of files. It's drawn in one go instead of thousands of separate buttons (adding 500 files took about 7 seconds before)
+- Clicking a file shows it right away. Before, it could take 3–4 seconds with a big list
+  - The next few files load in the background, so going down the list is instant
+  - Click another file while one is still opening and the app just switches, no more "Busy, try again"
+- Keyboard in the Files list: ↑ ↓ Home End to move, Space to tick, Delete to remove, Ctrl+A to tick all. Shift+click a box to tick a range
+- Save all is several times faster: it saves several emotes at once
+- Big batches don't fill up your memory anymore: the app keeps only the last 40 files you looked at in memory. This works in both the Emotes tab and the Converter
+- Converter: the list stays where you scrolled while converting, and each finished file keeps its size and "saved" label
+
 ## v1.8.5 — 2026-11-27
 - The **Discord settings** button under **Send to Discord** is bigger and easier to see (Emotes tab and Converter)
 - Emotes tab: **Open folder** is now the folder button next to **Save to**, so everything fits
