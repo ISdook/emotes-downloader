@@ -38,7 +38,7 @@ except ImportError:  # pragma: no cover
     print("Pillow is missing. Install it with:  python -m pip install pillow")
     sys.exit(1)
 
-__version__ = "1.7.0"
+__version__ = "1.7.1"
 UA = f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) emotes-downloader/{__version__}"
 GITHUB_REPO = "ISdook/emotes-downloader"
 PORTABLE_ASSET = "Emotes-Downloader-Portable.exe"
@@ -1007,6 +1007,22 @@ class DiscordLink:
     def owner_matches(self):
         uid, owner = str(self.user.get("id") or ""), self.d.get("owner_id") or ""
         return not uid or not owner or uid == owner
+
+    def guard(self, gid):
+        """Checked right before every send, so the bot only ever works for its owner, in the owner's own servers.
+        The bot has no commands and never goes online, so nobody else in a server can use it."""
+        self.check_bot()   # fresh: Public Bot setting and app owner
+        if not self.is_private():
+            raise DiscordError("Your bot is set to Public. Turn off “Public Bot” (Settings → Discord → Fix), "
+                               "so only you can use it.")
+        uid, owner = str(self.user.get("id") or ""), self.d.get("owner_id") or ""
+        if not uid or not owner or uid != owner:
+            raise DiscordError("You're logged in with a different Discord account than the one that owns this bot.")
+        mine = {g["id"]: g for g in self.servers()}   # fresh, from YOUR login, not the bot's
+        if gid not in mine:
+            raise DiscordError("This isn't one of your servers, or you can't add emojis there anymore.")
+        if not mine[gid]["bot_in"]:
+            raise DiscordError("The bot isn't in this server yet. Press Invite bot first.")
 
     def portal_bot_url(self):
         return f"https://discord.com/developers/applications/{self.client_id}/bot"
@@ -3807,6 +3823,11 @@ def run_gui(start_hidden=False):
                 res_box._first = True
 
                 def job():
+                    try:
+                        dl.guard(gid)
+                    except Exception as e:  # noqa
+                        self.ui(lambda e=e: result_line(f"Not sent: {e}", False))
+                        return None
                     good = 0
                     for name, data, ext in items:
                         lbl = {}
@@ -3834,6 +3855,9 @@ def run_gui(start_hidden=False):
                 def finish(good):
                     st["sending"] = False
                     if not top.winfo_exists():
+                        return
+                    if good is None:
+                        send.configure(text="Try again", state="normal", image=self.ico("refresh", "#ffffff", 15))
                         return
                     bad = n - good
                     if bad == 0:

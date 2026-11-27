@@ -138,6 +138,8 @@ The bot belongs to **your** Discord account, so nobody else can use it. You don'
 
 **Privacy check:** Settings shows **Private ✓** when only you can add the bot. If **Public Bot** is on, or the app belongs to a different account, it shows a red warning and a **Fix** button.
 
+**Only you can use it:** the bot has no commands and never goes online, so other people in your server can't do anything with it. The server list comes from **your** Discord login, so it only shows your servers, never other servers the bot might be in. Before every send, the app checks with Discord that the bot is still private, that you're logged in as its owner, and that the server is yours. If one of these fails, nothing is sent and a red line says why.
+
 **Permissions:** the bot only asks for permission to add emojis and stickers. To add emotes, you need **Manage Expressions** (or **Create Expressions**) in that server, and so does the bot.
 
 ---

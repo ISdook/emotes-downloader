@@ -2,6 +2,16 @@
 
 Every release gets an entry here. The release build fails without one, and the text becomes the GitHub release notes and the app's "What's new" window.
 
+## v1.7.1 — 2026-11-27
+- Send to Discord is now locked to you. Before every send, the app checks with Discord that:
+  - your bot is still private (Public Bot off)
+  - you're logged in with the account that owns the bot
+  - the server is one of your own servers where you can add emojis, and the bot is in it
+
+  If any check fails, nothing is sent and a red line says why
+- Only your servers are listed: the list comes from your own Discord login, never from the servers the bot is in
+- The bot has no commands and never goes online, so other people in your server can't use it
+
 ## v1.7.0 — 2026-11-27
 - New **Send to Discord**: add finished emotes and stickers straight to your servers with your own private bot
   - Set it up once in Settings → Discord: make an app in the Discord Developer Portal, paste its 3 values and log in with Discord in your browser. The invite link for your server opens by itself
