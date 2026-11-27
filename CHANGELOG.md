@@ -2,6 +2,10 @@
 
 Every release gets an entry here. The release build fails without one, and the text becomes the GitHub release notes and the app's "What's new" window.
 
+## v1.8.3 — 2026-11-27
+- Browse 7TV: animated emotes now play at their real speed. Before, they played in slow motion (most of them about 2.5× too slow)
+- Smoother animations in Browse 7TV: every frame is shown (up to 240), and the grid updates about 60 times a second
+
 ## v1.8.2 — 2026-11-27
 - Fixed: for some people, "Update now" did nothing or the app closed and didn't come back
   - Portable version: updating broke when the app's folder had Arabic or other non-English letters in its path (for example a Windows user name or OneDrive's Desktop folder). The new version now finishes the update by itself, and works in any folder

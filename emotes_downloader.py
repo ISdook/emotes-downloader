@@ -39,7 +39,7 @@ except ImportError:  # pragma: no cover
     print("Pillow is missing. Install it with:  python -m pip install pillow")
     sys.exit(1)
 
-__version__ = "1.8.2"
+__version__ = "1.8.3"
 UA = f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) emotes-downloader/{__version__}"
 GITHUB_REPO = "ISdook/emotes-downloader"
 PORTABLE_ASSET = "Emotes-Downloader-Portable.exe"
@@ -226,7 +226,7 @@ def fetch_thumb(ref):
     return im.convert("RGBA").copy()
 
 
-def fetch_thumb_frames(ref, box, max_frames=90):
+def fetch_thumb_frames(ref, box, max_frames=240):
     """Preview frames for the Browse grid: every frame of 2x.webp (already composited by Pillow), scaled to fit
     `box`. Returns (frames, durations_ms). A still emote gives one frame."""
     url = ref.host.get("url") or f"//cdn.7tv.app/emote/{ref.id}"
@@ -238,8 +238,9 @@ def fetch_thumb_frames(ref, box, max_frames=90):
     frames, durs = [], []
     for k in range(n):
         src.seek(k)
+        src.load()                               # Pillow fills in the frame's duration only once it's decoded
         d = int(src.info.get("duration") or 0)
-        d = d if d >= 20 else 100                # like browsers: 0/10 ms frames play at 100 ms
+        d = d if d > 10 else 100                 # like browsers: 0-10 ms frames play at 100 ms
         if k % step:
             if durs:
                 durs[-1] += d
@@ -4539,7 +4540,7 @@ def run_gui(start_hidden=False):
                     st["anim"][i] = [ref.id, 0]
                     if not st["ticking"]:
                         st["ticking"] = True
-                        top.after(40, tick)
+                        top.after(15, tick)
 
             def tick():
                 """Plays the animated previews that are on screen. All emotes follow one clock, like on 7tv.app."""
@@ -4568,7 +4569,7 @@ def run_gui(start_hidden=False):
                         if k != a[1]:
                             a[1] = k
                             cv.itemconfigure(f"thumb{i}", image=st["imgs"][a[0]][k])
-                top.after(40, tick)
+                top.after(15, tick)
 
             def redraw_all():
                 cv.delete("all")
