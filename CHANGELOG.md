@@ -2,6 +2,15 @@
 
 Every release gets an entry here. The release build fails without one, and the text becomes the GitHub release notes and the app's "What's new" window.
 
+## v1.12.1 — 2026-11-28
+- Fixed: your settings (and your Discord login) could be lost if the app closed while saving them. They're now saved safely
+- Fixed: sending more than 200 emotes in an hour no longer gets stuck waiting for each one. The app stops and tells you when you can send again. Press **Send** then, and only the ones not added yet are sent
+- The app's hourly limit now tells you exactly how many minutes are left, instead of always "wait a bit"
+- Adding more files to the Files list keeps the emotes you already ticked
+- Fixed: a sticker whose name has a " in it couldn't be sent
+- Updating the portable version: only the app's own leftover files are deleted (a file you named "….old-backup.exe" stays), and leftovers are also cleaned up when the app's name has [ ] in it
+- Fixed: a rare case where an update could fail right after the app started
+
 ## v1.12.0 — 2026-11-27
 - **The bot is now called "Emotes Downloader"** and has the same picture as the app
 - **The "My own bot (Advanced)" mode is gone.** Log in with Discord is the only way now. It's simpler and safer

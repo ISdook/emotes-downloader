@@ -39,7 +39,7 @@ except ImportError:  # pragma: no cover
     print("Pillow is missing. Install it with:  python -m pip install pillow")
     sys.exit(1)
 
-__version__ = "1.12.0"
+__version__ = "1.12.1"
 UA = f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) emotes-downloader/{__version__}"
 GITHUB_REPO = "ISdook/emotes-downloader"
 PORTABLE_ASSET = "Emotes-Downloader-Portable.exe"
@@ -936,7 +936,8 @@ def backend_request(method, path, session=None, json_body=None, form=None, files
                 j = {}
             msg = j.get("error") or f"The Emotes Downloader server answered {e.code}."
             code = j.get("code", 0)
-            err = DiscordError(msg, e.code, code if isinstance(code, int) else 0)
+            # Discord's codes are numbers, the backend's own are words ("hourly_limit", "no_slots"…): keep both
+            err = DiscordError(msg, e.code, code if isinstance(code, (int, str)) else 0)
             err.retry_after = float(j.get("retry_after") or 0)
             if e.code == 429 and 0 < err.retry_after <= 90 and attempt < 3:
                 if on_wait:
@@ -1065,7 +1066,8 @@ class PublicLink:
 
     def add_sticker(self, gid, name, data, ext, on_wait=None, tags="grinning"):
         name = name[:30] if len(name) >= 2 else name + "_"
-        files = {"file": (f"{name}.{ext}", data, "image/gif" if ext == "gif" else "image/png")}
+        # fixed file name: the sticker's own name can hold " or other characters that would break the upload
+        files = {"file": (f"sticker.{'gif' if ext == 'gif' else 'png'}", data, "image/gif" if ext == "gif" else "image/png")}
         r = self._call("POST", f"/api/guilds/{gid}/stickers", form={"name": name, "tags": tags}, files=files,
                        on_wait=on_wait)
         self._guild_cache.pop(gid, None)
@@ -1379,6 +1381,10 @@ def portable_handoff():
     return True
 
 
+UPDATE_STARTED = threading.Event()   # set by apply_update: the leftover cleanup must stop touching files
+_CLEANUP_LOCK = threading.Lock()     # held while the cleanup deletes, so apply_update can wait for it
+
+
 def cleanup_after_update():
     """Delete the leftover copies an update leaves next to the portable .exe ('X.new.exe', 'X.old*.exe').
     They may still be closing (or being scanned by an antivirus), so keep trying for a while."""
@@ -1389,23 +1395,33 @@ def cleanup_after_update():
     if me != base:
         return
 
+    # Only the names _take_over makes: "X.old.exe" and "X.old<time>.exe". Not a glob: the user's own
+    # "X.old-backup.exe" must stay, and names with [ ] must still match.
+    old_name = re.compile(rf"^{re.escape(base.stem)}\.old\d*\.exe$", re.IGNORECASE)
+
     def leftovers():
         out = [new] if new.exists() else []
-        out += [f for f in me.parent.glob(f"{base.stem}.old*.exe") if f.is_file()]
+        try:
+            out += [f for f in me.parent.iterdir() if old_name.match(f.name) and f.is_file()]
+        except OSError:
+            pass
         probe = me.with_name(".emotes_update_test")
         return out + ([probe] if probe.exists() else [])
 
     def job():
         for _ in range(180):                              # up to 3 minutes
-            left = leftovers()
-            if not left:
-                return
-            for f in left:
-                try:
-                    f.unlink()
-                    update_log(f"portable update: removed leftover {f.name}")
-                except OSError:
-                    pass
+            with _CLEANUP_LOCK:
+                if UPDATE_STARTED.is_set():               # an update is writing X.new.exe / the probe now
+                    return
+                left = leftovers()
+                if not left:
+                    return
+                for f in left:
+                    try:
+                        f.unlink()
+                        update_log(f"portable update: removed leftover {f.name}")
+                    except OSError:
+                        pass
             time.sleep(1)
     threading.Thread(target=job, daemon=True).start()
 
@@ -1424,6 +1440,9 @@ def _check_exe(data):
 
 def apply_update(info, progress=None):
     """Download and start installing the update. The caller must quit the app right after."""
+    UPDATE_STARTED.set()          # stop cleanup_after_update: it would delete the new X.new.exe / probe
+    with _CLEANUP_LOCK:           # ...and wait until it has finished what it was deleting
+        pass
     kind = install_kind()
     assets = info["assets"]
 
@@ -1565,11 +1584,31 @@ def load_config():
     return cfg
 
 
+_CONFIG_LOCK = threading.Lock()
+
+
 def save_config(cfg):
-    try:
-        CONFIG_PATH.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
-    except Exception:
-        pass
+    """Saves the settings safely: written to a temp file first, then swapped in, so a crash or two saves at
+    once (the Discord login saves from a background thread) can never leave a half-written file, which
+    load_config would read as "no settings" and reset everything, the Discord login included."""
+    with _CONFIG_LOCK:
+        for _ in range(3):
+            try:
+                text = json.dumps(cfg, indent=2)
+                break
+            except RuntimeError:      # another thread changed the settings while they were being read
+                time.sleep(0.05)
+        else:
+            return
+        tmp = CONFIG_PATH.with_name(CONFIG_PATH.name + ".tmp")
+        try:
+            tmp.write_text(text, encoding="utf-8")
+            os.replace(tmp, CONFIG_PATH)
+        except Exception:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
 
 
 def _autostart_cmd():
@@ -1802,9 +1841,10 @@ def run_gui(start_hidden=False):
             self.frame.grid(**kw)
 
         # --- data
-        def set(self, names):
+        def set(self, names, keep_checked=False):
+            """keep_checked: rows were only added at the end, so the ticks you made stay."""
             self.names = list(names)
-            self.checked = set()
+            self.checked = {i for i in self.checked if i < len(self.names)} if keep_checked else set()
             self.sel = self.hover = self.anchor = None
             self._fit_cache.clear()
             self._region()
@@ -1840,6 +1880,10 @@ def run_gui(start_hidden=False):
 
         def redraw(self):
             self.cv.delete("row")
+            w = self.cv.winfo_width()
+            if w != getattr(self, "_fit_w", None):     # names are fitted per width: forget the old widths
+                self._fit_w = w
+                self._fit_cache.clear()
             if not self.names:
                 return
             first, last = self._visible()
@@ -2725,12 +2769,13 @@ def run_gui(start_hidden=False):
                 first = 0
                 self.items = list(items)
                 self.set_title = title if len(items) > 1 else None
-            self._rebuild_rows()
+            self._rebuild_rows(keep_checked=append)
             if self.items:
                 self.select_item(first)
 
-        def _rebuild_rows(self):
-            self.flist.set([it["name"] for it in self.items])
+        def _rebuild_rows(self, keep_checked=False):
+            """keep_checked: only when files were added at the end (the ticks still point at the same files)."""
+            self.flist.set([it["name"] for it in self.items], keep_checked=keep_checked)
             n = len(self.items)
             self.side_title.configure(text=f"FILES · {n}" if n else "FILES")
             if n:
@@ -2741,7 +2786,7 @@ def run_gui(start_hidden=False):
                 self.save_all_btn.grid(row=11, column=0, padx=18, pady=(8, 0), sticky="ew")
             else:
                 self.save_all_btn.grid_forget()
-            self.all_var.set(False)
+            self.all_var.set(bool(n) and len(self.flist.checked) == n)
             self._update_save_all()
 
         def em_pick_files(self):
@@ -4587,6 +4632,13 @@ def run_gui(start_hidden=False):
                                 break
                             except DiscordError as e:
                                 err = e
+                                if e.code == "hourly_limit":
+                                    # The app's own limit per hour: waiting here would take ages for every
+                                    # emote left, so stop the batch and say when Send works again.
+                                    st["stop"] = stopped = True
+                                    self.ui(lambda e=e: result_line(f"⏸ {e} Press Send again then: only the "
+                                                                    "ones not added yet are sent.", "wait"))
+                                    break
                                 if e.status == 429 and e.retry_after and not st["stop"]:
                                     # Discord's upload limit for this server: wait it out (Stop works meanwhile)
                                     left = int(e.retry_after) + 1

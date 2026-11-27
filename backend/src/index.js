@@ -564,9 +564,17 @@ async function logUpload(env, row) {
 }
 
 async function checkUploadLimit(env, userId) {
-  if (await recentUploads(env, userId) >= UPLOADS_PER_HOUR) {
-    fail(429, `You've added ${UPLOADS_PER_HOUR} emotes in the last hour. Please wait a bit.`, { retry_after: 600 });
-  }
+  const n = await recentUploads(env, userId);
+  if (n < UPLOADS_PER_HOUR) return;
+  // The limit is a rolling hour: uploads are allowed again once enough of the ones in the window are an
+  // hour old to get back under the limit, i.e. when row number (n - limit) (oldest first) ages out.
+  const row = await env.DB.prepare(
+    "SELECT created_at FROM uploads WHERE user_id = ? AND created_at > ? ORDER BY created_at ASC LIMIT 1 OFFSET ?")
+    .bind(userId, now() - 3600e3, n - UPLOADS_PER_HOUR).first();
+  const wait = row ? Math.max(1, Math.ceil((row.created_at + 3600e3 - now()) / 1000)) : 60;
+  const mins = Math.max(1, Math.ceil(wait / 60));
+  fail(429, `You've added ${UPLOADS_PER_HOUR} emotes in the last hour. You can add more in about ${mins} minute${mins === 1 ? "" : "s"}.`,
+    { retry_after: wait, code: "hourly_limit" });
 }
 
 function dataUri(bytes, mime) {
@@ -745,7 +753,15 @@ async function apiAdd7tv(req, env, s, guildId) {
   const body = await req.json().catch(() => fail(400, "Bad request."));
   if (body.dry === true) {                 // preview: how it would be cut, nothing is added
     await checkUploadLimit(env, s.user_id);
-    const em = await sevenTvEmoji(env, body.link, { name: body.name, cut: body.cut !== false });
+    let em;
+    try {
+      em = await sevenTvEmoji(env, body.link, { name: body.name, cut: body.cut !== false });
+    } finally {
+      // A preview cuts with Cloudflare Images (5,000 cuts a month on the free plan), so it counts toward the
+      // hourly limit like an upload. kind 'preview' rows are left out of the server's history.
+      await logUpload(env, { guild_id: guildId, user_id: s.user_id, user_name: s.user_name, kind: "preview",
+        name: cleanEmojiName(body.name || "preview"), ok: !!em, source: "preview" });
+    }
     return json({ ok: true, dry: true, pieces: em.pieces, note: em.note, cut_error: em.cutError || null,
       items: em.items.map((it) => ({ name: it.name, kb: Math.round(it.image.length * 3 / 4 / 1024), image: it.image })) });
   }
@@ -882,9 +898,8 @@ async function route(req, env, ctx) {
   const gid = m[1];
   const rest = m[2] || "";
   if (rest === "" && M === "GET") {
-    await authorize(env, gid, s.user_id, CAN_UPLOAD);
+    const { perms } = await authorize(env, gid, s.user_id, CAN_UPLOAD);   // checked first, once
     const d = await guildDetails(env, gid);
-    const { perms } = await authorize(env, gid, s.user_id, CAN_UPLOAD);
     return json({ ...d, can_manage: !!(perms & CAN_MANAGE) });
   }
   if (rest === "/emojis" && M === "POST") return apiAddEmoji(req, env, s, gid);
@@ -893,7 +908,8 @@ async function route(req, env, ctx) {
   if (rest === "/history" && M === "GET") {
     await authorize(env, gid, s.user_id, CAN_UPLOAD);
     const rows = await env.DB.prepare(
-      "SELECT user_name, kind, name, ok, error, source, created_at FROM uploads WHERE guild_id = ? ORDER BY created_at DESC LIMIT 50")
+      "SELECT user_name, kind, name, ok, error, source, created_at FROM uploads WHERE guild_id = ? AND kind != 'preview' "
+      + "ORDER BY created_at DESC LIMIT 50")
       .bind(gid).all();
     return json({ items: rows.results || [] });
   }
