@@ -741,6 +741,12 @@ async function addSevenTv(env, { guildId, user, link, name, cut, source }) {
 async function apiAdd7tv(req, env, s, guildId) {
   await authorize(env, guildId, s.user_id, CAN_UPLOAD);
   const body = await req.json().catch(() => fail(400, "Bad request."));
+  if (body.dry === true) {                 // preview: how it would be cut, nothing is added
+    await checkUploadLimit(env, s.user_id);
+    const em = await sevenTvEmoji(env, body.link, { name: body.name, cut: body.cut !== false });
+    return json({ ok: true, dry: true, pieces: em.pieces, note: em.note,
+      items: em.items.map((it) => ({ name: it.name, kb: Math.round(it.image.length * 3 / 4 / 1024), image: it.image })) });
+  }
   const res = await addSevenTv(env, {
     guildId, user: { id: s.user_id, name: s.user_name }, link: body.link, name: body.name,
     cut: body.cut !== false, source: "7tv",
