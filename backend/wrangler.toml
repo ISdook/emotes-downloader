@@ -1,0 +1,30 @@
+# Emotes Downloader backend: login with Discord, the public bot, the dashboard and /emote commands.
+# Deployed by .github/workflows/backend.yml. Secrets (never in this file):
+#   DISCORD_CLIENT_SECRET, DISCORD_BOT_TOKEN   (wrangler secret put …)
+name = "emotes-downloader"
+main = "src/index.js"
+compatibility_date = "2024-11-01"
+workers_dev = true
+
+[vars]
+# Public values from the Discord Developer Portal (General Information page). Not secret.
+DISCORD_CLIENT_ID = "1575959367180881950"
+DISCORD_PUBLIC_KEY = "faca44893aedbf9a39d555c07dfd182b6fe71abc905fe899d07fb842913cc947"
+DISCORD_API = "https://discord.com/api/v10"
+SEVENTV_API = "https://7tv.io/v3"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "emotes-downloader"
+database_id = "SET_BY_DEPLOY"
+migrations_dir = "migrations"
+
+# Clean up old logins and tickets once a day.
+[triggers]
+crons = ["17 3 * * *"]
+
+# The dashboard's page, styles and browser script are bundled as text.
+[[rules]]
+type = "Text"
+globs = ["**/*.html", "**/*.css", "**/*.client.js"]
+fallthrough = false
