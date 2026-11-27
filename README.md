@@ -110,16 +110,21 @@ The **Converter** tab is for when you want full control and don't want to upload
 
 ![Send to Discord](docs/discord.png)
 
-After saving an emote or sticker, the **Send to Discord** panel shows every server where you're allowed to add emojis:
+Press **Send to Discord** on the Emotes tab (or in the Converter). It sends:
+- **every emote you ticked** in the Files list (the button says how many, for example **Send 15 to Discord**)
+- or, if nothing is ticked, the emote you're looking at (a cut emote sends all its pieces)
 
-- **In colour:** your bot is in that server. You'll see the free emoji, animated and sticker slots.
-- **Dark:** the bot isn't there yet. Press **Invite bot** to add it.
+The app saves them first, then opens the panel:
+- **Left:** the emotes that will be sent. Click a name to rename it (emoji names can only use letters, numbers and `_`, 2–32 characters), or press **×** to leave one out.
+- **Right:** every server where you're allowed to add emojis:
+  - **In colour:** your bot is in that server. You'll see the free emoji, animated and sticker slots, and a red warning if they won't all fit.
+  - **Dark:** the bot isn't there yet. Press **Invite bot** to add it.
 
-Pick a server and press **Send**. Each emote gets a line:
+Pick a server and press **Send**. The emotes go one by one, and each gets a ✓ or ✗ and a line under **Results**:
 - **green** when it's added
-- **red** with the reason when it isn't, for example no free slots, a missing permission or a file that's too big
+- **red** with the reason when it isn't, for example no free slots or a name Discord doesn't accept. One failing never stops the others.
 
-Then you can **Try again** or pick another server. You can also open the panel any time with **Send to Discord** on the Emotes tab or in the Converter.
+If Discord asks the app to slow down, it waits and shows a countdown. Press **Stop** any time. Afterwards **Send** only sends the ones that aren't added yet, so you can fix a name or pick another server and press it again.
 
 ### Set up your private bot (once, about 2 minutes)
 

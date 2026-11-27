@@ -26,7 +26,7 @@ Everything is in one file, **`emotes_downloader.py`** (~5,700 lines). The sectio
 | `# Auto-updater` | `check_for_update`, `apply_update`, portable swap (`finish_portable_update`, `portable_handoff`, `cleanup_after_update`), changelog |
 | `# Settings` | `DEFAULTS`, `load_config`/`save_config`, save-location presets |
 | `# Icons` | `draw_icon`: every icon is drawn with Pillow (no icon files) |
-| `# GUI` → `run_gui()` | `FastList` (canvas-based Files list) and `class App`. App sections are marked `# ================= name =================` |
+| `# GUI` → `run_gui()` | `FastList` (canvas-based Files list), `SendList` (emotes in the Send to Discord panel) and `class App`. App sections are marked `# ================= name =================` |
 | `# Command line` | `run_cli`, and `__main__` (handles `--finish-update`, `--update`, `--tray`) |
 
 Other files:
@@ -81,6 +81,7 @@ The owner (ISdook) has given standing permission to publish releases without ask
   - The bot has no commands and never connects to the gateway.
 - The bot's name and picture are fixed: **"ISdook - emotes downloader"** with the ISdook GitHub avatar. `brand()` puts them back on every start.
 - Show results line by line: green for success, red with the reason for failure.
+- **Send to Discord** sends all ticked Files (`_checked()`), or the current one if none are ticked. Panel items are dicts (`name`, `ext`, `path` or `data`, `kb`, `status`, `msg`); files are read only when sent. One failure never stops the batch; full slots are skipped locally; long 429s are waited out with a countdown and **Stop**; Send again retries only items not added.
 - Secrets are stored with Windows DPAPI (`protect`). Never log or commit tokens.
 
 ## Testing (no Windows here, so test headless)

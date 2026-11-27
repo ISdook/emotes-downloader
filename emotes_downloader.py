@@ -39,7 +39,7 @@ except ImportError:  # pragma: no cover
     print("Pillow is missing. Install it with:  python -m pip install pillow")
     sys.exit(1)
 
-__version__ = "1.9.1"
+__version__ = "1.10.0"
 UA = f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) emotes-downloader/{__version__}"
 GITHUB_REPO = "ISdook/emotes-downloader"
 PORTABLE_ASSET = "Emotes-Downloader-Portable.exe"
@@ -811,6 +811,15 @@ class DiscordError(RuntimeError):
     def __init__(self, msg, status=0, code=0):
         super().__init__(msg)
         self.status, self.code = status, code
+        self.retry_after = 0
+
+
+def clean_discord_name(name, kind="emoji"):
+    """Emoji: 2-32 characters, only A-Z a-z 0-9 _. Sticker: 2-30 characters."""
+    if kind == "sticker":
+        n = re.sub(r"\s+", " ", (name or "").strip())[:30]
+        return n if len(n) >= 2 else (n + "_" * (2 - len(n)) if n else "sticker")
+    return sanitize_name((name or "").strip(" :"))
 
 
 def protect(text):
@@ -935,7 +944,9 @@ def discord_request(method, path, bot=None, bearer=None, json_body=None, form=No
             if e.code == 429:
                 wait = float(j.get("retry_after") or e.headers.get("Retry-After") or 5)
                 if wait > 90 or attempt == 3:
-                    raise DiscordError(f"Discord is rate-limiting this. Try again in {int(wait) + 1} s.", 429) from None
+                    err = DiscordError(f"Discord is rate-limiting this. Try again in {int(wait) + 1} s.", 429)
+                    err.retry_after = wait
+                    raise err from None
                 if on_wait:
                     on_wait(wait)
                 time.sleep(wait + 0.3)
@@ -2191,6 +2202,219 @@ def run_gui(start_hidden=False):
                 self._redraw_row(self.sel)
                 self.on_check()
 
+    class SendList:
+        """The emotes in the Send to Discord panel, drawn on one canvas (only visible rows), so a batch of
+        hundreds opens instantly. Click a name to rename it, × removes it. Shows ✓ / ✗ per emote while sending."""
+
+        def __init__(self, parent, kind, items, on_change):
+            try:
+                S = ctk.ScalingTracker.get_widget_scaling(parent)
+            except Exception:
+                S = 1.0
+            self.px = px = lambda v: int(round(v * S))  # noqa: E731
+            self.kind, self.items, self.on_change = kind, items, on_change
+            self.RH, self.TH = px(54), px(40)
+            self.locked, self.hover, self.editing = False, None, None
+            self.thumbs = {}
+            self.font = tkfont.Font(family=FAMILY, size=-px(13), weight="bold")
+            self.small = tkfont.Font(family=FAMILY, size=-px(11))
+            self.frame = ctk.CTkFrame(parent, fg_color=C["field"], corner_radius=12)
+            self.frame.grid_rowconfigure(0, weight=1)
+            self.frame.grid_columnconfigure(0, weight=1)
+            self.cv = cv = tk.Canvas(self.frame, bg=C["field"], highlightthickness=0, bd=0)
+            cv.grid(row=0, column=0, sticky="nsew", padx=(6, 0), pady=6)
+            self.sb = ctk.CTkScrollbar(self.frame, command=self._yview, button_color=C["card_hi"],
+                                       button_hover_color=C["border"], width=12)
+            self.sb.grid(row=0, column=1, sticky="ns", padx=(2, 4), pady=6)
+            cv.configure(yscrollcommand=self.sb.set)
+            cv.bind("<Configure>", lambda _e: self.redraw())
+            cv.bind("<Button-1>", self._click)
+            cv.bind("<Motion>", lambda e: self._set_hover(self._index(e)))
+            cv.bind("<Leave>", lambda _e: self._set_hover(None))
+            cv.bind("<MouseWheel>", lambda e: self._wheel(-1 if e.delta > 0 else 1, abs(e.delta)))
+            cv.bind("<Button-4>", lambda _e: self._wheel(-1, 120))
+            cv.bind("<Button-5>", lambda _e: self._wheel(1, 120))
+            self._region()
+
+        def grid(self, **kw):
+            self.frame.grid(**kw)
+
+        # --- helpers
+        @staticmethod
+        def data(it):
+            return it["data"] if it.get("data") is not None else Path(it["path"]).read_bytes()
+
+        def label(self, it):
+            return f":{it['name']}:" if self.kind == "emoji" else it["name"]
+
+        def _thumb(self, it):
+            key = id(it)
+            if key not in self.thumbs:
+                try:
+                    src = io.BytesIO(it["data"]) if it.get("data") is not None else it["path"]
+                    im = Image.open(src)
+                    im.seek(0)
+                    im = im.convert("RGBA")
+                    im.thumbnail((self.TH, self.TH), Image.Resampling.LANCZOS)
+                    self.thumbs[key] = ImageTk.PhotoImage(im)
+                except Exception:
+                    self.thumbs[key] = None
+            return self.thumbs[key]
+
+        def _region(self):
+            self.cv.configure(scrollregion=(0, 0, 1, max(1, len(self.items) * self.RH + self.px(4))))
+
+        def _visible(self):
+            y0 = self.cv.canvasy(0)
+            return (max(0, int(y0 // self.RH)),
+                    min(len(self.items) - 1, int((y0 + self.cv.winfo_height()) // self.RH) + 1))
+
+        def _index(self, e):
+            i = int(self.cv.canvasy(e.y) // self.RH)
+            return i if 0 <= i < len(self.items) else None
+
+        # --- drawing
+        def redraw(self):
+            self.cv.delete("row")
+            if self.items:
+                a, b = self._visible()
+                for i in range(a, b + 1):
+                    self._draw(i)
+
+        def update_row(self, i):
+            self.cv.delete(f"r{i}")
+            a, b = self._visible()
+            if a <= i <= b and i < len(self.items):
+                self._draw(i)
+
+        def _draw(self, i):
+            px, cv, it = self.px, self.cv, self.items[i]
+            w, y = max(10, cv.winfo_width()), i * self.RH
+            tags = ("row", f"r{i}")
+            if i == self.hover and not self.locked:
+                cv.create_rectangle(0, y + px(2), w, y + self.RH - px(2), fill=C["card"], outline="", tags=tags)
+            th = self._thumb(it)
+            if th:
+                cv.create_image(px(8) + self.TH // 2, y + self.RH // 2, image=th, tags=tags)
+            tx = px(16) + self.TH
+            st_ = it.get("status")
+            right = px(34)
+            cv.create_text(tx, y + px(18), anchor="w", text=self.label(it), fill=C["text"], font=self.font,
+                           tags=tags + (f"name{i}",))
+            sub, col = it.get("msg"), {"ok": C["good"], "err": C["bad"], "busy": C["accent"]}.get(st_, C["faint"])
+            if not sub:
+                kb = it.get("kb")
+                sub = ("animated" if it["ext"] == "gif" else "still") + (f" · {kb} KB" if kb else "") + \
+                    ("" if self.locked else "  ·  click the name to rename")
+            fit = sub
+            while self.small.measure(fit) > w - tx - right and len(fit) > 4:
+                fit = fit[:-2]
+            if fit != sub:
+                fit = fit.rstrip() + "…"
+            cv.create_text(tx, y + px(37), anchor="w", text=fit, fill=col, font=self.small, tags=tags)
+            cx, cy = w - px(18), y + self.RH // 2
+            if st_ == "ok":
+                cv.create_text(cx, cy, text="✓", fill=C["good"], font=self.font, tags=tags)
+            elif st_ == "err":
+                cv.create_text(cx, cy, text="✗", fill=C["bad"], font=self.font, tags=tags)
+            elif st_ == "busy":
+                cv.create_text(cx, cy, text="…", fill=C["accent"], font=self.font, tags=tags)
+            elif not self.locked:
+                r = px(10)
+                hot = i == self.hover
+                cv.create_oval(cx - r, cy - r, cx + r, cy + r, fill=C["card_hi"] if hot else "", outline="",
+                               tags=tags)
+                cv.create_text(cx, cy, text="×", fill=C["bad"] if hot else C["muted"], font=self.font, tags=tags)
+
+        # --- scrolling / mouse
+        def _yview(self, *a):
+            self._end_edit()
+            self.cv.yview(*a)
+            self.redraw()
+
+        def _wheel(self, d, amount):
+            self._end_edit()
+            self.cv.yview_scroll(d * max(1, int(amount / 120)) * 2, "units")
+            self.redraw()
+
+        def _set_hover(self, i):
+            if i != self.hover:
+                old, self.hover = self.hover, i
+                for j in (old, i):
+                    if j is not None:
+                        self.update_row(j)
+
+        def _click(self, e):
+            i = self._index(e)
+            if i is None or self.locked:
+                return
+            w = self.cv.winfo_width()
+            if e.x >= w - self.px(34):                   # ×
+                self._end_edit()
+                it = self.items.pop(i)
+                self.thumbs.pop(id(it), None)
+                self.hover = None
+                self._region()
+                self.redraw()
+                self.on_change()
+                return
+            if e.x >= self.px(16) + self.TH:             # rename
+                self._edit(i)
+
+        # --- renaming
+        def _edit(self, i):
+            self._end_edit()
+            it, px = self.items[i], self.px
+            var = tk.StringVar(value=it["name"])
+            ent = tk.Entry(self.cv, textvariable=var, font=self.font, bg=C["card_hi"], fg=C["text"],
+                           insertbackground=C["text"], relief="flat", highlightthickness=1,
+                           highlightbackground=C["accent"], highlightcolor=C["accent"])
+            x = px(16) + self.TH
+            win = self.cv.create_window(x, i * self.RH + px(18), anchor="w", window=ent,
+                                        width=self.cv.winfo_width() - x - px(40), height=px(26))
+            self.editing = (i, ent, win, var)
+            ent.focus_set()
+            ent.select_range(0, "end")
+            ent.bind("<Return>", lambda _e: self._end_edit())
+            ent.bind("<Escape>", lambda _e: self._end_edit(cancel=True))
+            ent.bind("<FocusOut>", lambda _e: self._end_edit())
+
+        def _end_edit(self, cancel=False):
+            if not self.editing:
+                return
+            i, ent, win, var = self.editing
+            self.editing = None
+            text = var.get()
+            self.cv.delete(win)
+            ent.destroy()
+            if not cancel and i < len(self.items):
+                it = self.items[i]
+                new = clean_discord_name(text, self.kind)
+                others = {x["name"].lower() for k, x in enumerate(self.items) if k != i}
+                base, n = new, 2
+                while new.lower() in others:                  # keep names unique in this batch
+                    sfx = f"_{n}"
+                    new = base[: (32 if self.kind == "emoji" else 30) - len(sfx)] + sfx
+                    n += 1
+                it["name"] = new
+                if it.get("status") == "err":
+                    it["status"] = it["msg"] = None
+                self.update_row(i)
+                self.on_change()
+
+        def lock(self, on):
+            self._end_edit()
+            self.locked = on
+            self.redraw()
+
+        def see(self, i):
+            y0, h = self.cv.canvasy(0), self.cv.winfo_height()
+            total = max(1, len(self.items) * self.RH + self.px(4))
+            top_ = i * self.RH
+            if top_ < y0 or top_ + self.RH > y0 + h:
+                self.cv.yview_moveto(max(0, top_ - h // 2) / total)
+                self.redraw()
+
     class App:
         def __init__(self, root):
             self.root = root
@@ -2805,6 +3029,7 @@ def run_gui(start_hidden=False):
         def _update_save_all(self):
             k = len(self._checked())
             self.save_all_btn.configure(text=f"Save selected ({k})" if k else f"Save all ({len(self.items)})")
+            self.send_btn.configure(text=f" Send {k} to Discord" if k > 1 else " Send to Discord")
 
         def ensure_loaded(self, it):
             """Returns (frames, raw). Use these, not it["frames"]/it["raw"]: on another thread the
@@ -3019,7 +3244,7 @@ def run_gui(start_hidden=False):
             self._sync_save_to()
             self.say(f"Emotes will be saved to {self.out_dir()}", "ok")
 
-        def on_save(self, batch, after=None):
+        def on_save(self, batch, after=None, after_all=None):
             if batch:
                 targets = self._checked() or list(self.items)
             elif self.current is not None:
@@ -3076,6 +3301,14 @@ def run_gui(start_hidden=False):
                 ok = [r for _, r in results if r]
                 failed = len(results) - len(ok)
                 self.last_out = out
+                if after_all:
+                    if ok:
+                        self.say(f"Saved {len(ok)} emote{'s' if len(ok) != 1 else ''} to {out}"
+                                 + (f" · {failed} failed (see Log)" if failed else ""), "warn" if failed else "ok")
+                        after_all(results)
+                    else:
+                        self.say("Nothing was saved, so there's nothing to send. See Log for details.", "err")
+                    return
                 if len(results) == 1 and ok:
                     res = ok[0]
                     big = max(sz for _, sz in res["files"])
@@ -4264,9 +4497,33 @@ def run_gui(start_hidden=False):
 
         # ================= Send to Discord =================
         def _payload_from_result(self, res, target):
-            items = [(p.stem, p.read_bytes(), p.suffix.lstrip(".").lower()) for p, _ in res["files"]]
-            base = res["files"][0][0].stem if len(items) == 1 else re.sub(r"\d+$", "", res["files"][0][0].stem)
-            return dict(kind="sticker" if target == "sticker" else "emoji", title=base, items=items)
+            return self._payload_from_results([(None, res)], target)
+
+        def _payload_from_results(self, results, target):
+            """Send-panel items from saved emotes. Files are read only when they're sent (big batches)."""
+            kind = "sticker" if target == "sticker" else "emoji"
+            items, failed, seen = [], [], set()
+            for it, res in results:
+                if not res:
+                    if it is not None:
+                        failed.append(it["name"])
+                    continue
+                for p, size in res["files"]:
+                    name = clean_discord_name(p.stem, kind)
+                    base, n = name, 2
+                    while name.lower() in seen:
+                        sfx = f"_{n}"
+                        name = base[: (32 if kind == "emoji" else 30) - len(sfx)] + sfx
+                        n += 1
+                    seen.add(name.lower())
+                    items.append(dict(name=name, path=str(p), ext=p.suffix.lstrip(".").lower(), kb=size // 1024))
+            ok = [r for _, r in results if r]
+            if len(ok) == 1:
+                f0 = ok[0]["files"][0][0].stem
+                title = f0 if len(ok[0]["files"]) == 1 else re.sub(r"\d+$", "", f0)
+            else:
+                title = ""                                  # a batch: the subtitle says how many
+            return dict(kind=kind, title=title, items=items, failed=failed)
 
         def discord_link(self, parent):
             """Small 'Discord settings' link shown under the Send buttons."""
@@ -4290,10 +4547,19 @@ def run_gui(start_hidden=False):
             return True
 
         def on_send_discord(self):
-            if self.current is None or self._need_discord():
+            """Sends every ticked emote in the Files list. Nothing ticked: the one you're looking at."""
+            if self._need_discord():
                 return
             target = self.settings()["target"]
-            self.on_save(False, after=lambda res: self.open_send_panel(self._payload_from_result(res, target)))
+            checked = self._checked()
+            if checked:
+                self.on_save(True, after_all=lambda results: self.open_send_panel(
+                    self._payload_from_results(results, target)))
+            elif self.current is not None:
+                self.on_save(False, after=lambda res: self.open_send_panel(self._payload_from_result(res, target)))
+            else:
+                self.say("Tick the emotes you want to send in the Files list (or click one), then press Send to Discord.",
+                         "warn")
 
         def conv_send_discord(self):
             if self.conv_sel is None or self.conv_sel >= len(self.conv_items):
@@ -4316,7 +4582,8 @@ def run_gui(start_hidden=False):
                 self.say("Emojis must be at most 256 KB. Lower the colours or frame rate, or choose the Emoji preset.", "err")
                 return
             name = sanitize_name(Path(it["path"]).stem)
-            self.open_send_panel(dict(kind=kind, title=name, items=[(name, res["data"], res["ext"])]))
+            self.open_send_panel(dict(kind=kind, title=name, items=[dict(
+                name=clean_discord_name(name, kind), data=res["data"], ext=res["ext"], kb=len(res["data"]) // 1024)]))
 
         def _guild_icon(self, g, dim=False, size=40):
             key = (g["id"], dim)
@@ -4352,96 +4619,135 @@ def run_gui(start_hidden=False):
             return img
 
         def open_send_panel(self, payload):
+            """Send one emote, a cut emote's pieces, or a whole batch of ticked emotes to one of your servers.
+            Left: the emotes (rename / remove before sending, ✓ / ✗ while sending). Right: your servers."""
             if self._need_discord():
                 return
             if getattr(self, "send_win", None) is not None and self.send_win.winfo_exists():
+                if getattr(self, "_send_busy", False):
+                    self.send_win.lift()
+                    self.say("Wait for the current send to finish (or press Stop), then try again.", "warn")
+                    return
                 self.send_win.destroy()
             dl = self.discord
-            kind, items = payload["kind"], payload["items"]
-            n = len(items)
-            animated = sum(1 for _, _, ext in items if ext == "gif")
-            word = ("sticker" if kind == "sticker" else "emoji") + ("s" if n > 1 and kind == "sticker" else "")
-            top = self.dialog("Send to Discord", 680, 760)
+            kind = payload["kind"]
+            items = [dict(x) for x in payload["items"]]
+            failed_saves = payload.get("failed") or []
+            noun1, nouns = ("sticker", "stickers") if kind == "sticker" else ("emoji", "emojis")
+            top = self.dialog("Send to Discord", 960, 680)
             self.send_win = top
             self._gicon_raw = getattr(self, "_gicon_raw", {})
-            top.grid_rowconfigure(3, weight=1)
-            st = dict(sel=None, servers=[], rows={}, sending=False)
+            top.grid_rowconfigure(1, weight=1)
+            st = dict(sel=None, servers=[], rows={}, sending=False, stop=False)
 
+            # header
             hd = ctk.CTkFrame(top, fg_color="transparent")
-            hd.grid(row=0, column=0, sticky="ew", padx=24, pady=(20, 6))
+            hd.grid(row=0, column=0, sticky="ew", padx=24, pady=(20, 10))
             hd.grid_columnconfigure(1, weight=1)
             ctk.CTkLabel(hd, text="", image=self.ico("send", C["blurple"], 26)).grid(row=0, column=0, rowspan=2, padx=(0, 12))
             self.label(hd, "Send to Discord", 18, bold=True, anchor="w").grid(row=0, column=1, sticky="w")
-            self.label(hd, f"{payload['title']}  ·  {n} {word}" + (f" ({animated} animated)" if animated and kind == "emoji" else ""),
-                       12, "muted", anchor="w").grid(row=1, column=1, sticky="w")
+            subtitle = self.label(hd, "", 12, "muted", anchor="w")
+            subtitle.grid(row=1, column=1, sticky="w")
 
-            pv = ctk.CTkFrame(top, fg_color=C["discord"], corner_radius=12)
-            pv.grid(row=1, column=0, sticky="ew", padx=24, pady=(6, 10))
-            strip = ctk.CTkFrame(pv, fg_color="transparent")
-            strip.pack(padx=12, pady=10, anchor="w")
-            self._send_thumbs = []
-            for name, data, ext in items[:8]:
-                try:
-                    im = Image.open(io.BytesIO(data)).convert("RGBA")
-                    side = 64 if kind == "sticker" else 44
-                    im.thumbnail((side, side))
-                    ci = ctk.CTkImage(im, im, size=im.size)
-                    self._send_thumbs.append(ci)
-                    cell = ctk.CTkFrame(strip, fg_color="transparent")
-                    cell.pack(side="left", padx=(0, 8))
-                    ctk.CTkLabel(cell, text="", image=ci).pack()
-                    self.label(cell, f":{name}:" if kind == "emoji" else name, 10, "muted").pack()
-                except Exception:
-                    pass
-            if n > 8:
-                self.label(strip, f"+{n - 8} more", 12, "muted").pack(side="left", padx=8)
+            body = ctk.CTkFrame(top, fg_color="transparent")
+            body.grid(row=1, column=0, sticky="nsew", padx=24)
+            body.grid_columnconfigure(0, weight=0, minsize=380)
+            body.grid_columnconfigure(1, weight=1)
+            body.grid_rowconfigure(1, weight=1)
 
-            acc = ctk.CTkFrame(top, fg_color="transparent")
-            acc.grid(row=2, column=0, sticky="ew", padx=24)
+            # left: the emotes
+            lh = ctk.CTkFrame(body, fg_color="transparent")
+            lh.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+            left_title = self.label(lh, "", 11, "muted", bold=True)
+            left_title.pack(side="left")
+            if kind == "emoji":
+                self.label(lh, "   names: 2–32 letters, numbers or _", 11, "faint").pack(side="left")
+            sl = SendList(body, kind, items, lambda: refresh_counts())
+            sl.grid(row=1, column=0, sticky="nsew", padx=(0, 14))
+            self._send_list = sl
+
+            # right: servers + results
+            right = ctk.CTkFrame(body, fg_color="transparent")
+            right.grid(row=0, column=1, rowspan=2, sticky="nsew")
+            right.grid_columnconfigure(0, weight=1)
+            right.grid_rowconfigure(1, weight=1)
+            acc = ctk.CTkFrame(right, fg_color="transparent")
+            acc.grid(row=0, column=0, sticky="ew", pady=(0, 8))
             self.label(acc, "CHOOSE A SERVER", 11, "muted", bold=True).pack(side="left")
             self.label(acc, f"   {'signed in as' if dl.logged_in() else 'bot owner:'} {dl.user.get('name', '?')}",
                        11, "faint").pack(side="left")
-            self.button(acc, "Refresh", lambda: load(fresh=True), "flat", width=90, height=28,
+            self.button(acc, "Refresh", lambda: load(fresh=True), "flat", width=90, height=26,
                         image=self.ico("refresh", C["muted"], 13), compound="left").pack(side="right")
-
-            lst = ctk.CTkScrollableFrame(top, fg_color=C["card"], corner_radius=14, border_width=1, border_color=C["border"],
+            lst = ctk.CTkScrollableFrame(right, fg_color=C["card"], corner_radius=14, border_width=1, border_color=C["border"],
                                          scrollbar_button_color=C["card_hi"], scrollbar_button_hover_color=C["border"])
-            lst.grid(row=3, column=0, sticky="nsew", padx=24, pady=(8, 8))
+            lst.grid(row=1, column=0, sticky="nsew")
             lst.grid_columnconfigure(0, weight=1)
-            warn = self.label(top, "", 12, "bad", anchor="w", justify="left", wraplength=620)
-            warn.grid(row=4, column=0, sticky="ew", padx=26)
+            warn = self.label(right, "", 12, "bad", anchor="w", justify="left", wraplength=500)
+            warn.grid(row=2, column=0, sticky="ew", pady=(6, 0))
+            self.label(right, "RESULTS", 11, "muted", bold=True, anchor="w").grid(row=3, column=0, sticky="w", pady=(8, 4))
+            res = ctk.CTkTextbox(right, height=130, corner_radius=12, fg_color=C["field"], text_color=C["muted"],
+                                 font=self.F(12), wrap="word", border_width=0)
+            res.grid(row=4, column=0, sticky="ew")
+            for tag, col in (("ok", C["good"]), ("err", C["bad"]), ("info", C["muted"]), ("wait", C["warn"])):
+                res.tag_config(tag, foreground=col)
+            res.insert("end", "Results will show here.\n", "info")
+            res.configure(state="disabled")
+            res_state = dict(first=True)
 
-            res_box = ctk.CTkScrollableFrame(top, fg_color=C["field"], corner_radius=12, height=96,
-                                             scrollbar_button_color=C["card_hi"], scrollbar_button_hover_color=C["border"])
-            res_box.grid(row=5, column=0, sticky="ew", padx=24, pady=(6, 8))
-            try:
-                res_box._scrollbar.configure(height=10)   # CTk's default 200px scrollbar would stretch the box
-            except Exception:
-                pass
-            self.label(res_box, "Results will show here.", 12, "faint", anchor="w").pack(anchor="w", padx=6, pady=4)
-
+            # footer
             ft = ctk.CTkFrame(top, fg_color="transparent")
-            ft.grid(row=6, column=0, sticky="ew", padx=24, pady=(6, 18))
-            send_txt = f"Send {'sticker' if kind == 'sticker' else ('emote' if n == 1 else f'{n} emotes')}"
-            send = self.button(ft, send_txt, lambda: do_send(), "discord", width=200, height=42,
+            ft.grid(row=2, column=0, sticky="ew", padx=24, pady=(12, 18))
+            prog = self.label(ft, "", 12, "muted", anchor="w")
+            prog.pack(side="left")
+            send = self.button(ft, "Send", lambda: do_send(), "discord", width=220, height=42,
                                image=self.ico("send", "#ffffff", 16), compound="left")
             send.pack(side="right")
             send.configure(state="disabled")
-            self.button(ft, "Close", top.destroy, "ghost", width=100, height=42).pack(side="right", padx=(0, 8))
+            close = self.button(ft, "Close", lambda: close_or_stop(), "ghost", width=100, height=42)
+            close.pack(side="right", padx=(0, 8))
 
-            def result_line(text, ok=None):
-                if getattr(res_box, "_first", True):
-                    for w in res_box.winfo_children():
-                        w.destroy()
-                    res_box._first = False
-                color = C["good"] if ok else C["bad"] if ok is False else C["muted"]
-                icon = self.ico("check", C["good"], 14) if ok else self.ico("close", C["bad"], 13) if ok is False else None
-                lb = ctk.CTkLabel(res_box, text=("  " if icon else "") + text, image=icon, compound="left",
-                                  font=self.F(12, ok is not None), text_color=color, anchor="w", justify="left",
-                                  wraplength=580)
-                lb.pack(anchor="w", padx=6, pady=2)
-                res_box.after(30, lambda: res_box._parent_canvas.yview_moveto(1.0))
-                return lb
+            def close_or_stop():
+                if st["sending"]:
+                    st["stop"] = True
+                    close.configure(text="Stopping…", state="disabled")
+                    prog.configure(text="Stopping after this one…")
+                else:
+                    top.destroy()
+            top.protocol("WM_DELETE_WINDOW", close_or_stop)
+
+            def result_line(text, tag="info"):
+                res.configure(state="normal")
+                if res_state["first"]:
+                    res.delete("1.0", "end")
+                    res_state["first"] = False
+                res.insert("end", text + "\n", tag)
+                res.see("end")
+                res.configure(state="disabled")
+
+            def todo():
+                """What the Send button sends: everything not added yet."""
+                return [it for it in items if it.get("status") != "ok"]
+
+            def refresh_counts():
+                n = len(items)
+                anim = sum(1 for it in items if it["ext"] == "gif")
+                subtitle.configure(text=(f"{payload['title']}  ·  " if payload.get("title") else "")
+                                        + f"{n} {noun1 if n == 1 else nouns} selected"
+                                        + (f" ({anim} animated)" if anim and kind == "emoji" else ""))
+                left_title.configure(text=f"{'STICKERS' if kind == 'sticker' else 'EMOTES'} · {n}")
+                left = len(todo())
+                if not st["sending"]:
+                    if not items:
+                        send.configure(text="Nothing to send", state="disabled")
+                    elif left == 0:
+                        send.configure(text="All sent", state="disabled", image=self.ico("check", "#ffffff", 16))
+                    else:
+                        word = noun1 if kind == "sticker" else "emote"
+                        send.configure(text=f"Send {left} {word}{'s' if left != 1 else ''}",
+                                       state="normal" if st["sel"] else "disabled",
+                                       image=self.ico("send", "#ffffff", 16))
+                if st["sel"]:
+                    check_room(st["sel"])
 
             def slots_text(info):
                 if kind == "sticker":
@@ -4454,19 +4760,24 @@ def run_gui(start_hidden=False):
                 if not info:
                     warn.configure(text="")
                     return
+                rest = todo()
                 if kind == "sticker":
                     free = info["sticker_limit"] - info["stickers"]
-                    msg = "" if free >= 1 else f"This server has no free sticker slots ({info['stickers']}/{info['sticker_limit']})."
+                    msg = "" if free >= len(rest) else (
+                        f"Only {max(0, free)} free sticker slot{'s' if free != 1 else ''} here "
+                        f"({info['stickers']}/{info['sticker_limit']}). The rest will be skipped.")
                 else:
-                    need_a, need_s = animated, n - animated
+                    need_a = sum(1 for it in rest if it["ext"] == "gif")
+                    need_s = len(rest) - need_a
                     free_a, free_s = info["limit"] - info["animated"], info["limit"] - info["static"]
                     bits = []
                     if need_a > free_a:
-                        bits.append(f"animated: needs {need_a}, only {max(0, free_a)} free")
+                        bits.append(f"animated: {need_a} to send, {max(0, free_a)} free")
                     if need_s > free_s:
-                        bits.append(f"still: needs {need_s}, only {max(0, free_s)} free")
-                    msg = ("Not enough emoji slots here (" + "; ".join(bits) + ").") if bits else ""
-                warn.configure(text=msg)
+                        bits.append(f"still: {need_s} to send, {max(0, free_s)} free")
+                    msg = ("Not enough emoji slots (" + "; ".join(bits) + "). The ones that don't fit will be skipped."
+                           ) if bits else ""
+                warn.configure(text=msg, text_color=C["bad"])
 
             def select(gid):
                 if st["sending"]:
@@ -4477,8 +4788,7 @@ def run_gui(start_hidden=False):
                         r["frame"].configure(border_color=C["blurple"] if g_id == gid else C["border"],
                                              border_width=2 if g_id == gid else 1)
                         r["dot"].configure(fg_color=C["blurple"] if g_id == gid else C["card"])
-                send.configure(state="normal")
-                check_room(gid)
+                refresh_counts()
 
             def fill_slots(g, sub):
                 def job():
@@ -4517,6 +4827,9 @@ def run_gui(start_hidden=False):
                     self.ui(done)
                 threading.Thread(target=job, daemon=True).start()
 
+            def invited():
+                warn.configure(text="After adding the bot in your browser, press Refresh.", text_color=C["muted"])
+
             def add_more():
                 """Without the Discord login, servers without the bot can't be listed: offer to add it anywhere."""
                 if dl.logged_in():
@@ -4524,11 +4837,10 @@ def run_gui(start_hidden=False):
                 f = ctk.CTkFrame(lst, fg_color="transparent")
                 f.pack(fill="x", padx=8, pady=(6, 8))
                 self.button(f, "Add the bot to another server", lambda: (
-                    __import__("webbrowser").open(dl.invite_url()),
-                    warn.configure(text="After adding the bot in your browser, press Refresh.", text_color=C["muted"])),
-                    "ghost", height=34, image=self.ico("external", C["text"], 13), compound="left").pack(side="left")
-                self.label(f, "  Tip: log in with Discord in Discord settings to see all your servers here.",
-                           11, "faint", anchor="w", wraplength=330, justify="left").pack(side="left", fill="x")
+                    __import__("webbrowser").open(dl.invite_url()), invited()),
+                    "ghost", height=34, image=self.ico("external", C["text"], 13), compound="left").pack(anchor="w")
+                self.label(f, "Tip: log in with Discord in Discord settings to see all your servers here.",
+                           11, "faint", anchor="w", wraplength=440, justify="left").pack(anchor="w", pady=(4, 0))
 
             def build(servers):
                 for w in lst.winfo_children():
@@ -4541,7 +4853,7 @@ def run_gui(start_hidden=False):
                                13, "muted", justify="center").pack(pady=(30, 10))
                     add_more()
                     return
-                for i, g in enumerate(servers):
+                for g in servers:
                     inside = g["bot_in"]
                     fr = ctk.CTkFrame(lst, fg_color=C["card_hi"] if inside else C["bg"], corner_radius=12,
                                       border_width=1, border_color=C["border"] if inside else C["bg"], height=64)
@@ -4569,18 +4881,24 @@ def run_gui(start_hidden=False):
                         fill_slots(g, sub)
                     else:
                         self.button(fr, "Invite bot", lambda gid=g["id"]: (__import__("webbrowser").open(dl.invite_url(gid)),
-                                                                           warn.configure(text="After adding the bot in your browser, press Refresh.",
-                                                                                          text_color=C["muted"])),
+                                                                           invited()),
                                     "ghost", width=110, height=32, image=self.ico("external", C["text"], 13),
                                     compound="left").grid(row=0, column=2, rowspan=2, padx=12)
                     st["rows"][g["id"]] = row
                     fetch_icon(g)
                 add_more()
                 firsts = [g for g in servers if g["bot_in"]]
-                if firsts and st["sel"] is None and len(firsts) == 1:
+                if st["sel"] and st["sel"] in st["rows"] and st["rows"][st["sel"]]["bot_in"]:
+                    select(st["sel"])
+                elif firsts and len(firsts) == 1:
                     select(firsts[0]["id"])
+                else:
+                    st["sel"] = None
+                    refresh_counts()
 
             def load(fresh=False):
+                if st["sending"]:
+                    return
                 if fresh:
                     dl._guild_cache.clear()
                 for w in lst.winfo_children():
@@ -4599,7 +4917,7 @@ def run_gui(start_hidden=False):
                         if err:
                             for w in lst.winfo_children():
                                 w.destroy()
-                            self.label(lst, str(err), 13, "bad", wraplength=560, justify="center").pack(pady=30)
+                            self.label(lst, str(err), 13, "bad", wraplength=480, justify="center").pack(pady=30)
                             return
                         st["servers"] = servers
                         build(servers)
@@ -4608,69 +4926,150 @@ def run_gui(start_hidden=False):
 
             def do_send():
                 gid = st["sel"]
-                if not gid or st["sending"]:
+                batch = todo()
+                if not gid or st["sending"] or not batch:
                     return
                 g = next(x for x in st["servers"] if x["id"] == gid)
-                st["sending"] = True
+                st.update(sending=True, stop=False)
+                self._send_busy = True
+                sl.lock(True)
                 send.configure(state="disabled", text="Sending…")
-                res_box._first = True
+                close.configure(text="Stop", state="normal")
+                res_state["first"] = True
+                total = len(batch)
+
+                def ui_item(it, status, msg):
+                    def f():
+                        it["status"], it["msg"] = status, msg
+                        try:
+                            i = items.index(it)
+                        except ValueError:
+                            return
+                        sl.update_row(i)
+                        if status == "busy":
+                            sl.see(i)
+                    self.ui(f)
 
                 def job():
                     try:
                         dl.guard(gid)
                     except Exception as e:  # noqa
-                        self.ui(lambda e=e: result_line(f"Not sent: {e}", False))
+                        self.ui(lambda e=e: result_line(f"✗ Not sent: {e}", "err"))
                         return None
+                    try:   # free slots right now, so emotes that can't fit are skipped without asking Discord
+                        info = dl.guild_info(gid, fresh=True)
+                        if kind == "sticker":
+                            free = {"sticker": info["sticker_limit"] - info["stickers"]}
+                        else:
+                            free = {"gif": info["limit"] - info["animated"], "still": info["limit"] - info["static"]}
+                    except Exception:
+                        free = None
                     good = 0
-                    for name, data, ext in items:
-                        lbl = {}
-                        self.ui(lambda name=name, lbl=lbl: lbl.setdefault(
-                            "w", result_line(f"Adding {(':' + name + ':') if kind == 'emoji' else name}…")))
+                    for k, it in enumerate(batch, 1):
+                        if st["stop"]:
+                            break
+                        label = f":{it['name']}:" if kind == "emoji" else f"“{it['name']}”"
+                        slot = "sticker" if kind == "sticker" else ("gif" if it["ext"] == "gif" else "still")
+                        self.ui(lambda k=k: prog.configure(text=f"Sending {k} of {total}…"))
+                        if free is not None and free.get(slot, 1) <= 0:
+                            why = ("No free sticker slots left in this server." if kind == "sticker" else
+                                   f"No free {'animated' if slot == 'gif' else 'still'} emoji slots left in this server.")
+                            ui_item(it, "err", why)
+                            self.ui(lambda label=label, why=why: result_line(f"✗ Skipped {label} — {why}", "err"))
+                            continue
+                        ui_item(it, "busy", "sending…")
 
-                        def waiting(sec, lbl=lbl):
-                            self.ui(lambda: lbl.get("w") and lbl["w"].configure(
-                                text=f"Discord asked to slow down, waiting {int(sec) + 1} s…"))
-                        try:
-                            if kind == "sticker":
-                                dl.add_sticker(gid, name, data, ext, on_wait=waiting)
-                                msg = f"Added the sticker “{name}” to {g['name']}"
-                            else:
-                                dl.add_emoji(gid, name, data, ext, on_wait=waiting)
-                                msg = f"Added :{name}: to {g['name']}"
-                            ok = True
+                        def waiting(sec, it=it):
+                            ui_item(it, "busy", f"Discord asked to slow down, waiting {int(sec) + 1} s…")
+                        err, stopped = None, False
+                        for _attempt in range(3):
+                            try:
+                                data = SendList.data(it)
+                                if kind == "sticker":
+                                    dl.add_sticker(gid, it["name"], data, it["ext"], on_wait=waiting)
+                                else:
+                                    dl.add_emoji(gid, it["name"], data, it["ext"], on_wait=waiting)
+                                err = None
+                                break
+                            except DiscordError as e:
+                                err = e
+                                if e.status == 429 and e.retry_after and not st["stop"]:
+                                    # Discord's upload limit for this server: wait it out (Stop works meanwhile)
+                                    left = int(e.retry_after) + 1
+                                    while left > 0 and not st["stop"]:
+                                        m, s_ = divmod(left, 60)
+                                        ui_item(it, "busy", f"Discord's upload limit for this server: waiting {m}:{s_:02d}…")
+                                        self.ui(lambda m=m, s_=s_: prog.configure(
+                                            text=f"Waiting for Discord ({m}:{s_:02d})… press Stop to stop here."))
+                                        time.sleep(1)
+                                        left -= 1
+                                    if st["stop"]:
+                                        stopped = True          # never sent: not a failure
+                                        break
+                                    continue
+                                break
+                            except Exception as e:  # noqa (file missing, no internet…)
+                                err = e
+                                break
+                        if stopped:
+                            ui_item(it, None, None)
+                            break
+                        if err is None:
                             good += 1
-                        except Exception as e:  # noqa
-                            msg = f"{(':' + name + ':') if kind == 'emoji' else name}  →  {e}"
-                            ok = False
-                        self.ui(lambda msg=msg, ok=ok, lbl=lbl: (lbl.get("w") and lbl["w"].destroy(), result_line(msg, ok)))
+                            if free is not None:
+                                free[slot] = free.get(slot, 1) - 1
+                            ui_item(it, "ok", f"added to {g['name']}")
+                            self.ui(lambda label=label: result_line(f"✓ Added {label}", "ok"))
+                        else:
+                            if isinstance(err, DiscordError) and err.code == 30008 and free is not None:
+                                free[slot] = 0          # Discord says it's full: skip the rest of this type
+                            ui_item(it, "err", str(err))
+                            self.ui(lambda label=label, err=err: result_line(f"✗ Failed {label} — {err}", "err"))
                     return good
 
                 def finish(good):
                     st["sending"] = False
+                    self._send_busy = False
                     if not top.winfo_exists():
                         return
-                    if good is None:
-                        send.configure(text="Try again", state="normal", image=self.ico("refresh", "#ffffff", 15))
-                        return
-                    bad = n - good
-                    if bad == 0:
-                        result_line(f"Done! {'The sticker is' if kind == 'sticker' else ('The emote is' if n == 1 else f'All {n} emotes are')} "
-                                    f"in {g['name']} now.", True)
-                        self.toast("Sent to Discord", f"{payload['title']} → {g['name']}", "ok")
-                        send.configure(text="Sent", state="disabled", image=self.ico("check", "#ffffff", 16))
-                    else:
-                        result_line(f"{good} of {n} added. {bad} failed. See the red lines above.", False)
-                        send.configure(text="Try again", state="normal", image=self.ico("refresh", "#ffffff", 15))
+                    sl.lock(False)
+                    close.configure(text="Close", state="normal")
+                    prog.configure(text="")
+                    if good is not None:
+                        not_tried = [it for it in batch if it.get("status") not in ("ok", "err")]
+                        for it in not_tried:
+                            it["status"], it["msg"] = None, None
+                        sl.redraw()
+                        bad = total - good - len(not_tried)
+                        if st["stop"] and not_tried:
+                            result_line(f"Stopped. {good} added, {bad} failed, {len(not_tried)} not sent.", "wait")
+                        elif bad == 0:
+                            result_line(f"Done! {'All ' + str(total) if total > 1 else 'It'} "
+                                        f"{'are' if total > 1 else 'is'} in {g['name']} now.", "ok")
+                            self.toast("Sent to Discord", f"{payload.get('title') or f'{total} emotes'} → {g['name']}", "ok")
+                        else:
+                            result_line(f"{good} of {total} added, {bad} failed. Fix the red ones (rename, or free "
+                                        "some slots) and press Send again: only the missing ones are sent.", "err")
+                    refresh_counts()
                     r = st["rows"].get(gid)
                     if r:
                         dl._guild_cache.pop(gid, None)
                         fill_slots(g, r["sub"])
 
                 def run():
-                    good = job()
+                    try:
+                        good = job()
+                    except Exception as e:  # noqa
+                        self.ui(lambda e=e: result_line(f"✗ Something went wrong: {e}", "err"))
+                        good = None
                     self.ui(lambda: finish(good))
                 threading.Thread(target=run, daemon=True).start()
 
+            refresh_counts()
+            if failed_saves:
+                result_line(f"✗ Couldn't save {len(failed_saves)}: " + ", ".join(failed_saves[:10])
+                            + (" …" if len(failed_saves) > 10 else "") + " (see Log)", "err")
+                res_state["first"] = False
             load()
 
         # ================= toasts =================

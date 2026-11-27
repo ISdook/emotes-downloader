@@ -2,6 +2,19 @@
 
 Every release gets an entry here. The release build fails without one, and the text becomes the GitHub release notes and the app's "What's new" window.
 
+## v1.10.0 — 2026-11-27
+- **Send to Discord sends all your ticked emotes at once.** Tick 15 emotes in the Files list and the button says **Send 15 to Discord**. Before, it only sent the one you were looking at. With nothing ticked, it still sends the one you're looking at
+- New, bigger Send to Discord panel:
+  - The emotes to send are listed on the left with a picture, their `:name:` and size
+  - Click a name to rename it. Names are cleaned up for Discord by themselves (2–32 letters, numbers or _), and doubles get _2, _3
+  - Press × to leave one out
+- Sending a batch:
+  - Emotes go one by one, each with a ✓ or ✗ and a green or red line under Results. One failing never stops the rest
+  - The panel warns before sending if the server doesn't have enough free still or animated slots. Emotes that don't fit are skipped with the reason, without asking Discord
+  - If Discord asks to slow down, the app waits and shows a countdown, even for long waits
+  - New **Stop** button
+  - Pressing Send again only sends the ones that aren't added yet, so you can fix a name, free some slots or pick another server and continue
+
 ## v1.9.1 — 2026-11-27
 - Fixed: emotes with Arabic names (or emoji, or letters like é) no longer overwrite each other when you save several. Before, they were all saved as "emote", so only the last one was kept
   - Arabic names are now written in English letters, with a short tag so every emote gets its own name (for example ضحك becomes :dhk_ofem:). English names don't change
