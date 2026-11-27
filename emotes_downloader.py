@@ -39,7 +39,7 @@ except ImportError:  # pragma: no cover
     print("Pillow is missing. Install it with:  python -m pip install pillow")
     sys.exit(1)
 
-__version__ = "1.8.3"
+__version__ = "1.8.4"
 UA = f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) emotes-downloader/{__version__}"
 GITHUB_REPO = "ISdook/emotes-downloader"
 PORTABLE_ASSET = "Emotes-Downloader-Portable.exe"
@@ -1479,51 +1479,118 @@ def update_log(msg):
         pass
 
 
-def finish_portable_update(old, pid):
-    """Runs inside the NEW portable .exe: wait for the old app to close, copy this .exe over it, start it.
-    Plain Python, so folders with Arabic or other non-English names work (the old .bat broke on them)."""
-    old, me = Path(old), Path(sys.executable)
-    for _ in range(120):
-        if not _pid_alive(pid):
-            break
-        time.sleep(0.25)
+def portable_names(exe):
+    """For a portable .exe (also when it runs as 'X.new.exe' or 'X.old.exe'): (X.exe, X.new.exe, X.old.exe)."""
+    exe = Path(exe)
+    stem = exe.stem
+    for suf in (".new", ".old"):
+        if stem.lower().endswith(suf):
+            stem = stem[: -len(suf)]
+    base = exe.with_name(stem + ".exe")
+    return base, exe.with_name(stem + ".new.exe"), exe.with_name(stem + ".old.exe")
+
+
+def _take_over(old, me):
+    """Put this .exe (me) in place of the old one. Returns None or the last error."""
     err = None
-    for _ in range(60):                                   # the old .exe can stay locked for a moment
+    for _ in range(20):                                   # the old .exe can stay locked for a moment
         try:
             shutil.copyfile(me, old)
-            err = None
+            return None
+        except FileNotFoundError:
             break
         except OSError as e:
             err = e
             time.sleep(0.5)
+    # Still locked (antivirus scan, or the old app is still open): Windows does allow renaming a running
+    # .exe, so move the old one aside and put the new one under the real name. The aside copy is deleted
+    # by the new version as soon as Windows lets go of it.
+    try:
+        if old.exists():
+            aside = portable_names(old)[2]
+            try:
+                aside.unlink(missing_ok=True)
+            except OSError:
+                aside = old.with_name(f"{old.stem}.old{int(time.time())}.exe")
+            os.replace(old, aside)
+        shutil.copyfile(me, old)
+        return None
+    except OSError as e:
+        return e or err
+
+
+def finish_portable_update(old, pid=None):
+    """Runs inside the NEW portable .exe: wait for the old app to close, take over its file name, start it.
+    Plain Python, so folders with Arabic or other non-English names work (the old .bat broke on them)."""
+    old, me = Path(old), Path(sys.executable)
+    if pid:
+        for _ in range(120):
+            if not _pid_alive(pid):
+                break
+            time.sleep(0.25)
+    err = _take_over(old, me)
     if err is None:
-        update_log(f"portable update: replaced {old}")
+        update_log(f"portable update: {old.name} is now v{__version__}")
         subprocess.Popen([str(old)], creationflags=_detached(), close_fds=True, cwd=str(old.parent))
         return None
     update_log(f"portable update: couldn't replace {old}: {err}")
     return (f"The new version is running, but Windows didn't let it replace the old file:\n{old}\n\n"
-            f"({err})\n\nYou can keep using “{me.name}”, or close the app and rename it yourself. "
-            "Moving the app to a normal folder like Documents helps next time.")
+            f"({err})\n\nClose every Emotes Downloader window and open this one again: it finishes the "
+            "update by itself. Moving the app to a normal folder like Documents also helps.")
+
+
+def portable_handoff():
+    """Started as 'X.new.exe' (a leftover from an update)? Become X.exe, so there's only one app."""
+    if not is_frozen() or install_kind() != "portable":
+        return False
+    me = Path(sys.executable).resolve()
+    base, _, _ = portable_names(me)
+    if me == base or not me.stem.lower().endswith(".new"):
+        return False
+    if not base.exists():
+        try:
+            os.replace(me, base)                          # renaming a running .exe is allowed on Windows
+            update_log(f"portable update: renamed {me.name} to {base.name}")
+        except OSError:
+            pass
+        return False                                      # keep running (under the new name if that worked)
+    err = _take_over(base, me)
+    if err is not None:
+        update_log(f"portable update: couldn't take over {base}: {err}")
+        return False
+    update_log(f"portable update: {me.name} took over {base.name}")
+    subprocess.Popen([str(base)], creationflags=_detached(), close_fds=True, cwd=str(base.parent))
+    return True
 
 
 def cleanup_after_update():
-    """Delete the leftover '<name>.new.exe' from a portable update (it may still be closing, so retry)."""
+    """Delete the leftover copies an update leaves next to the portable .exe ('X.new.exe', 'X.old*.exe').
+    They may still be closing (or being scanned by an antivirus), so keep trying for a while."""
     if not is_frozen() or install_kind() != "portable":
         return
     me = Path(sys.executable).resolve()
-    if me.stem.endswith(".new"):
+    base, new, _ = portable_names(me)
+    if me != base:
         return
-    left = me.with_name(me.stem + ".new.exe")
+
+    def leftovers():
+        out = [new] if new.exists() else []
+        out += [f for f in me.parent.glob(f"{base.stem}.old*.exe") if f.is_file()]
+        probe = me.with_name(".emotes_update_test")
+        return out + ([probe] if probe.exists() else [])
 
     def job():
-        for _ in range(30):
-            if not left.exists():
+        for _ in range(180):                              # up to 3 minutes
+            left = leftovers()
+            if not left:
                 return
-            try:
-                left.unlink()
-                return
-            except OSError:
-                time.sleep(1)
+            for f in left:
+                try:
+                    f.unlink()
+                    update_log(f"portable update: removed leftover {f.name}")
+                except OSError:
+                    pass
+            time.sleep(1)
     threading.Thread(target=job, daemon=True).start()
 
 
@@ -5327,6 +5394,8 @@ def run_cli(argv):
 
 
 if __name__ == "__main__":
+    if len(sys.argv) == 1 and portable_handoff():        # a leftover 'X.new.exe' was opened: it became X.exe
+        os._exit(0)
     if len(sys.argv) > 3 and sys.argv[1] == FINISH_ARG:
         note = finish_portable_update(sys.argv[2], sys.argv[3])
         if note is None:

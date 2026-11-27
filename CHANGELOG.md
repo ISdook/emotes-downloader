@@ -2,6 +2,13 @@
 
 Every release gets an entry here. The release build fails without one, and the text becomes the GitHub release notes and the app's "What's new" window.
 
+## v1.8.4 — 2026-11-27
+- Portable version: updating no longer leaves two copies of the app. You keep one .exe with its normal name, and it's the new version
+  - If Windows keeps the old .exe locked for a while (for example while an antivirus scans it), the new version moves the old one aside and takes its name instead of giving up
+  - Leftover copies from earlier updates ("….new.exe", "….old.exe") are deleted automatically. The app keeps trying for up to 3 minutes, and again on every start
+  - Opening a leftover "….new.exe" turns it into the normal app and removes the old one
+  - Only the app's own leftover files are deleted, never anything else in the folder
+
 ## v1.8.3 — 2026-11-27
 - Browse 7TV: animated emotes now play at their real speed. Before, they played in slow motion (most of them about 2.5× too slow)
 - Smoother animations in Browse 7TV: every frame is shown (up to 240), and the grid updates about 60 times a second
