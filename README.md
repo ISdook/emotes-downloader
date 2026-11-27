@@ -19,7 +19,7 @@ It also has a built-in **Converter** for your own images, GIFs and videos, so yo
 | **Browse 7TV in the app** | Search 7TV, or look through Trending, Top and New. One click saves an emote, already sized for Discord. |
 | **Paste or copy a link** | Paste a 7TV emote, emote set or user link. Or just copy a link on 7tv.app, and the app notices it and offers **Save now**. |
 | **Cut big emotes into pieces** | **Auto** cuts wide emotes into square pieces, for example a 384×112 emote into `:OdaMeeting1:` to `:OdaMeeting4:`. You can also pick your own grid. |
-| **Discord-ready files** | Animated emotes become GIF and still ones PNG, at 128×128 and under 256 KB, keeping every frame whenever possible. |
+| **Emoji or sticker** | Choose **Emoji** (128×128, up to 256 KB, cut into pieces) or **Sticker** (exactly 320×320, up to 512 KB). Animated files become GIF and still ones PNG, keeping every frame whenever possible. |
 | **Converter** | Make an emoji, a sticker or any custom size from images, GIFs or videos, with your own size, fit, colours, frame rate and pixel-art scaling. |
 | **Drag and drop** | Drop files, whole folders or 7TV links anywhere on the window. |
 | **Files panel** | Collect lots of files or emotes, then save them all at once. |
@@ -55,22 +55,27 @@ It runs on Windows 10 and 11 (64-bit).
      - just an emote ID
    - **Copy a link** on [7tv.app](https://7tv.app/emotes). A bar pops up with **Save now**.
    - **Your own files**: use **Add files** / **Add folder** in the Files panel, or drag them onto the window. Images, GIFs and videos all work.
-2. **Check the cut.** The preview shows each piece separately with its `:name:` under it.
+2. **Emoji or sticker?** Choose at the top of the right panel:
+   - **Emoji**: 128×128 pieces, up to 256 KB each. Big emotes are cut into pieces.
+   - **Sticker**: one image, exactly 320×320 and up to 512 KB, the size Discord needs. Stickers are sent one per message, so they're never cut. They're saved in a `Stickers` folder.
+3. **Check the cut** (emoji). The preview shows each piece separately with its `:name:` under it.
    - **Auto** picks how many square pieces the emote needs, so each one fills a full-height square. Press **Auto** again to turn it off.
    - Use **Wide / Tall** to choose the grid yourself, for example 2 × 2 for a big emote.
-3. **Pick how it fits:**
+4. **Pick how it fits:**
    - **Fill** (default): fills each piece edge to edge.
    - **Stretch**: always stretches.
    - **Bars**: adds transparent bars so nothing is cut off.
    - **Crop**: trims the edges.
-4. **Choose where it's saved** with **Save to**:
+5. **Choose where it's saved** with **Save to**:
    - **App folder** (default): an `Emotes` folder next to the app.
    - **Downloads**, **Pictures** or **Desktop**.
    - **Custom folder…**: any folder you pick.
-5. **Press Save.**
+6. **Press Save.**
    - With several files in the list, **Save all** saves them all.
    - If you tick some, it becomes **Save selected** and saves only those.
-6. **Add them to Discord.** Upload the pieces to your server (Server Settings → Emoji), then type them next to each other: `:OdaMeeting1::OdaMeeting2::OdaMeeting3::OdaMeeting4:`.
+7. **Add them to Discord.**
+   - Emoji: upload the pieces in Server Settings → Emoji, then type them next to each other: `:OdaMeeting1::OdaMeeting2::OdaMeeting3::OdaMeeting4:`.
+   - Stickers: upload them in Server Settings → Stickers.
 
 ---
 
@@ -142,7 +147,8 @@ Changes save instantly.
 
 ## How the files are made
 
-- **Formats:** animated emotes become GIF and still ones PNG. These are the formats Discord accepts for emoji.
+- **Formats:** animated emotes become GIF and still ones PNG. These are the formats Discord accepts for emoji and stickers.
+- **Stickers:** always exactly 320×320. To get under 512 KB, only colours and frames are reduced, never the size.
 - **Staying under 256 KB:** the app keeps every frame and shrinks the piece first, to 96, 72, 64 or 48 px. Discord shows emotes at 48 px at most, so they still look sharp. Frames are dropped only as a last resort.
 - **Video-like emotes:** the app stores only what changes between frames, which leaves room for more detail.
 - **Cut emotes:** every piece gets the same settings, so the pieces animate in sync. Each cut emote gets its own folder.
@@ -178,6 +184,7 @@ Your own files are never uploaded anywhere.
 python emotes_downloader.py https://7tv.app/emotes/<id> --split auto
 python emotes_downloader.py <emote-id> --split 2x2 --fit cover --name BigKEKW
 python emotes_downloader.py https://7tv.app/emote-sets/<id> --out "D:\Emotes"
+python emotes_downloader.py <emote-id> --sticker
 python emotes_downloader.py --update
 ```
 

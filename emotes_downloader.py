@@ -36,7 +36,7 @@ except ImportError:  # pragma: no cover
     print("Pillow is missing. Install it with:  python -m pip install pillow")
     sys.exit(1)
 
-__version__ = "1.5.2"
+__version__ = "1.6.0"
 UA = f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) emotes-downloader/{__version__}"
 GITHUB_REPO = "ISdook/emotes-downloader"
 PORTABLE_ASSET = "Emotes-Downloader-Portable.exe"
@@ -68,6 +68,15 @@ GIF_TIERS = [
     (64, 1, 0.25, 18), (64, 2, 0.25, 22), (48, 3, 0.25, 28),
 ]
 PNG_TIERS = [(False, 1.0), (True, 1.0), (True, 0.75), (True, 0.5)]
+
+# Discord stickers must stay exactly 320x320 (max 512 KB), so only colours / frames are reduced.
+STICKER_SIZE = 320
+STICKER_LIMIT = 512 * 1024 - 2048
+STICKER_TIERS = [
+    (256, 1, 1.0, 0), (256, 1, 1.0, 10), (192, 1, 1.0, 14), (128, 1, 1.0, 16), (96, 1, 1.0, 18),
+    (128, 2, 1.0, 18), (96, 2, 1.0, 20), (64, 2, 1.0, 24), (64, 3, 1.0, 26), (48, 3, 1.0, 28),
+    (48, 4, 1.0, 32), (32, 4, 1.0, 34), (32, 6, 1.0, 36),
+]
 
 
 # --------------------------------------------------------------------------
@@ -385,7 +394,10 @@ def encode_gif(frames, colors=256, step=1, scale=1.0, thresh=0):
     durations = [d for _, d in fr]
     buf = io.BytesIO()
 
-    if not any_t and len(preps) > 1:
+    # Transparency that never changes (e.g. bars around a wide emote) works with frame deltas too.
+    static_t = any_t and len(preps) > 1 and all(ImageChops.difference(p[1], preps[0][1]).getbbox() is None
+                                                for p in preps[1:])
+    if (not any_t or static_t) and len(preps) > 1:
         # Opaque animation (video-like): store only what changes between frames.
         # Pixels that look the same as what's already on screen become transparent,
         # and the previous frame stays visible underneath (disposal 1). Same trick as gifsicle.
@@ -393,17 +405,21 @@ def encode_gif(frames, colors=256, step=1, scale=1.0, thresh=0):
         tindex = n
         lut = [255 if v <= thresh else 0 for v in range(256)]
         out, shown = [], None
-        for rgb, _, _ in preps:
+        for rgb, tmask, _ in preps:
             q = rgb.quantize(palette=pal_img, dither=Image.Dither.NONE)
             q.putpalette(pal + [0, 0, 0] * (256 - n))
             qrgb = q.convert("RGB")
             if shown is not None:
                 r, g, b = ImageChops.difference(rgb, shown).split()
                 same = ImageChops.lighter(ImageChops.lighter(r, g), b).point(lut)
+                if static_t:
+                    same = ImageChops.lighter(same, tmask)
                 q.paste(tindex, mask=same)
                 shown = Image.composite(shown, qrgb, same)
             else:
                 shown = qrgb
+                if static_t:
+                    q.paste(tindex, mask=tmask)  # transparent from the first frame on
             q.info["transparency"] = tindex
             out.append(q)
         out[0].save(buf, "GIF", save_all=True, append_images=out[1:], duration=durations, loop=0,
@@ -437,35 +453,39 @@ def encode_png(img, quantize=False, scale=1.0):
     return buf.getvalue()
 
 
-def encode_tiles(tiles, animated):
+def encode_tiles(tiles, animated, sticker=False):
     """Encode every piece with the SAME settings (keeps animations in sync).
     Returns (list_of_bytes, ext, note)."""
-    if not animated:
-        for quant, scale in PNG_TIERS:
-            data = [encode_png(t[0][0], quant, scale) for t in tiles]
-            if max(map(len, data)) <= SAFE_LIMIT:
-                return data, "png", _note(256 if not quant else 255, 1, scale, tile=tiles[0][0][0].size[0])
-        return data, "png", "WARNING: still over 256 KB"
-    data, worst = None, 0
+    limit = STICKER_LIMIT if sticker else SAFE_LIMIT
+    kb = 512 if sticker else 256
     tile = tiles[0][0][0].size[0]
-    for colors, step, scale, thresh in GIF_TIERS:
+    if not animated:
+        for quant, scale in (PNG_TIERS[:2] if sticker else PNG_TIERS):
+            data = [encode_png(t[0][0], quant, scale) for t in tiles]
+            if max(map(len, data)) <= limit:
+                return data, "png", _note(256 if not quant else 255, 1, scale, tile=tile, limit_kb=kb)
+        return data, "png", f"WARNING: still over {kb} KB"
+    data, worst = None, 0
+    tiers = STICKER_TIERS if sticker else GIF_TIERS
+    SAFE = limit
+    for colors, step, scale, thresh in tiers:
         if step > 1 and len(tiles[0]) < step * 2:
             continue
         # try the piece that was biggest last time first, and skip this level early if it doesn't fit
         first = encode_gif(tiles[worst], colors, step, scale, thresh)
-        if len(first) > SAFE_LIMIT:
+        if len(first) > SAFE:
             data = None
             continue
         data = [first if i == worst else encode_gif(t, colors, step, scale, thresh) for i, t in enumerate(tiles)]
         worst = max(range(len(data)), key=lambda i: len(data[i]))
-        if len(data[worst]) <= SAFE_LIMIT:
-            return data, "gif", _note(colors, step, scale, tile=tile, frames=len(tiles[0]))
+        if len(data[worst]) <= SAFE:
+            return data, "gif", _note(colors, step, scale, tile=tile, frames=len(tiles[0]), limit_kb=kb)
     if data is None:
-        data = [encode_gif(t, *GIF_TIERS[-1]) for t in tiles]
-    return data, "gif", "WARNING: still over 256 KB - try fewer pieces"
+        data = [encode_gif(t, *tiers[-1]) for t in tiles]
+    return data, "gif", f"WARNING: still over {kb} KB" + ("" if sticker else " - try fewer pieces")
 
 
-def _note(colors=256, step=1, scale=1.0, tile=128, frames=1):
+def _note(colors=256, step=1, scale=1.0, tile=128, frames=1, limit_kb=256):
     px = max(1, round(tile * scale))
     bits = [f"{px}×{px} px"]
     if frames > 1:
@@ -474,7 +494,7 @@ def _note(colors=256, step=1, scale=1.0, tile=128, frames=1):
         bits.append("fewer colours")
     if scale >= 1.0 and step == 1 and colors >= 255:
         return f"full quality, {px}×{px} px"
-    return "fit under 256 KB: " + ", ".join(bits)
+    return f"fit under {limit_kb} KB: " + ", ".join(bits)
 
 
 # --------------------------------------------------------------------------
@@ -682,16 +702,20 @@ def convert_media(frames, width, height, fmt="auto", fit="auto", pixel=False, co
 
 
 def make_emote(frames, name, out_dir, mode="none", cols=1, rows=1, tile=128,
-               fit="auto", original=None):
-    """Process and save. Returns dict(files, paste, note, folder)."""
+               fit="auto", original=None, target="emoji"):
+    """Process and save. target="sticker" makes one 320x320 Discord sticker (max 512 KB) in a Stickers folder.
+    Returns dict(files, paste, note, folder)."""
+    sticker = target == "sticker"
+    if sticker:
+        mode, tile = "none", STICKER_SIZE
     w, h = frames[0][0].size
     cols, rows = plan_grid(w, h, mode, cols, rows)
     count = cols * rows
     animated = len(frames) > 1
     tiles = cut_tiles(compose(frames, cols, rows, tile, fit), cols, rows, tile)
-    data, ext, note = encode_tiles(tiles, animated)
+    data, ext, note = encode_tiles(tiles, animated, sticker=sticker)
 
-    out_dir = Path(out_dir)
+    out_dir = Path(out_dir) / "Stickers" if sticker else Path(out_dir)
     if count == 1:
         base = sanitize_name(name)
         names = [base]
@@ -1405,36 +1429,48 @@ def run_gui(start_hidden=False):
             ctl.grid_columnconfigure(0, weight=1)
             pad = dict(padx=18, sticky="ew")
 
+            self.section(ctl, "Make it a").grid(row=0, column=0, pady=(16, 8), **pad)
+            self.target = self.cfg.get("target", "emoji")
+            self.target_seg = self.segmented(ctl, ["Emoji", "Sticker"], self.on_target)
+            self.target_seg.set("Sticker" if self.target == "sticker" else "Emoji")
+            self.target_seg.grid(row=1, column=0, **pad)
+            self.sticker_box = ctk.CTkFrame(ctl, fg_color=C["field"], corner_radius=10)
+            self.label(self.sticker_box, "Discord sticker", 13, bold=True, anchor="w").pack(anchor="w", padx=12, pady=(10, 0))
+            self.label(self.sticker_box, "Exactly 320×320 and up to 512 KB, the size Discord needs. Stickers are "
+                       "sent one per message, so they aren't cut into pieces.", 12, "muted", anchor="w",
+                       justify="left", wraplength=250).pack(anchor="w", padx=12, pady=(2, 10))
+
             hdr = ctk.CTkFrame(ctl, fg_color="transparent")
-            hdr.grid(row=0, column=0, pady=(16, 8), **pad)
+            self.cut_hdr = hdr
+            hdr.grid(row=2, column=0, pady=(18, 8), **pad)
             self.section(hdr, "Cut into pieces").pack(side="left")
             self.auto = bool(self.cfg.get("auto_grid", True))
             self.auto_btn = self.button(hdr, "Auto", self.on_auto, "accent", width=64, height=26,
                                         corner_radius=13, font=self.F(12, True))
             self.auto_btn.pack(side="right")
             self.grid_box = ctk.CTkFrame(ctl, fg_color="transparent")
-            self.grid_box.grid(row=1, column=0, **pad)
+            self.grid_box.grid(row=3, column=0, **pad)
             self.cols_var = tk.IntVar(value=int(self.cfg["cols"]))
             self.rows_var = tk.IntVar(value=int(self.cfg["rows"]))
             self._stepper(self.grid_box, "Wide", self.cols_var).pack(side="left")
             self._stepper(self.grid_box, "Tall", self.rows_var).pack(side="left", padx=(12, 0))
             self.mode_help = self.label(ctl, "", 12, "muted", anchor="w", justify="left", wraplength=280)
-            self.mode_help.grid(row=2, column=0, pady=(8, 0), **pad)
+            self.mode_help.grid(row=4, column=0, pady=(8, 0), **pad)
 
-            self.section(ctl, "Fit").grid(row=4, column=0, pady=(18, 8), **pad)
+            self.section(ctl, "Fit").grid(row=6, column=0, pady=(18, 8), **pad)
             self.fit_seg = self.segmented(ctl, list(FITS), lambda _v: self.on_option())
-            self.fit_seg.grid(row=5, column=0, **pad)
+            self.fit_seg.grid(row=7, column=0, **pad)
             self.fit_help = self.label(ctl, "", 12, "muted", anchor="w", justify="left", wraplength=280)
-            self.fit_help.grid(row=6, column=0, pady=(6, 0), **pad)
+            self.fit_help.grid(row=8, column=0, pady=(6, 0), **pad)
 
             self.save_btn = self.button(ctl, "Save", lambda: self.on_save(False), "accent",
                                         height=48, corner_radius=12, font=self.F(15, True),
                                         image=self.ico("download", "#ffffff", 18), compound="left")
-            self.save_btn.grid(row=7, column=0, pady=(20, 0), **pad)
+            self.save_btn.grid(row=9, column=0, pady=(20, 0), **pad)
             self.save_all_btn = self.button(ctl, "Save all", lambda: self.on_save(True), "ghost", height=38)
 
             st = ctk.CTkFrame(ctl, fg_color="transparent")
-            st.grid(row=9, column=0, pady=(14, 0), **pad)
+            st.grid(row=11, column=0, pady=(14, 0), **pad)
             st.grid_columnconfigure(1, weight=1)
             self.label(st, "Save to", 12, "muted").grid(row=0, column=0, padx=(0, 8))
             self.save_menu = ctk.CTkOptionMenu(
@@ -1445,12 +1481,12 @@ def run_gui(start_hidden=False):
             self.save_menu.grid(row=0, column=1, sticky="ew")
             self.path_lbl = ctk.CTkLabel(ctl, text="", font=self.F(11), text_color=C["faint"], anchor="w",
                                          justify="left", wraplength=280, cursor="hand2")
-            self.path_lbl.grid(row=10, column=0, pady=(4, 0), **pad)
+            self.path_lbl.grid(row=12, column=0, pady=(4, 0), **pad)
             self.path_lbl.bind("<Button-1>", lambda _e: self.on_open_out(True))
 
             self.button(ctl, "Open folder", lambda: self.on_open_out(), "ghost", height=38,
-                        image=self.ico("folder", C["text"], 15), compound="left").grid(row=11, column=0, pady=(14, 16), **pad)
-            ctl.grid_rowconfigure(12, weight=1)
+                        image=self.ico("folder", C["text"], 15), compound="left").grid(row=13, column=0, pady=(14, 16), **pad)
+            ctl.grid_rowconfigure(14, weight=1)
 
             # ---- status bar
             sb = ctk.CTkFrame(r, fg_color="transparent")
@@ -1468,6 +1504,7 @@ def run_gui(start_hidden=False):
             inv_f = {v: k for k, v in FITS.items()}
             self.fit_seg.set(inv_f.get(self.cfg["fit"], "Fill"))
             self._show_sidebar(True)
+            self._apply_target()
             self._sync_save_to()
             self._build_converter(r)
             self._build_drop_overlay(r)
@@ -1557,9 +1594,27 @@ def run_gui(start_hidden=False):
             self.save_all_btn.configure(state="disabled" if self.busy else "normal")
 
         def settings(self):
-            return dict(mode="auto" if self.auto else "custom", cols=self.cols_var.get(),
-                        rows=self.rows_var.get(), tile=int(self.cfg["tile"]),
-                        fit=FITS.get(self.fit_seg.get(), "auto"))
+            sticker = getattr(self, "target", "emoji") == "sticker"
+            return dict(mode="none" if sticker else ("auto" if self.auto else "custom"), cols=self.cols_var.get(),
+                        rows=self.rows_var.get(), tile=STICKER_SIZE if sticker else int(self.cfg["tile"]),
+                        fit=FITS.get(self.fit_seg.get(), "auto"), target="sticker" if sticker else "emoji")
+
+        def on_target(self, v):
+            self.target = "sticker" if v == "Sticker" else "emoji"
+            self.cfg["target"] = self.target
+            save_config(self.cfg)
+            self._apply_target()
+            self.refresh_preview()
+
+        def _apply_target(self):
+            if self.target == "sticker":
+                for w in (self.cut_hdr, self.grid_box, self.mode_help):
+                    w.grid_remove()
+                self.sticker_box.grid(row=2, column=0, rowspan=3, padx=18, pady=(12, 0), sticky="ew")
+            else:
+                self.sticker_box.grid_remove()
+                for w in (self.cut_hdr, self.grid_box, self.mode_help):
+                    w.grid()
 
         def remember(self):
             s = self.settings()
@@ -1598,9 +1653,13 @@ def run_gui(start_hidden=False):
             self.mode_help.configure(text=msg)
             fit = FITS.get(self.fit_seg.get(), "auto")
             txt = FIT_HELP[fit]
+            if getattr(self, "target", "emoji") == "sticker":
+                c, r = 1, 1
             if fit == "auto" and loaded:
                 real = resolve_fit("auto", *it["frames"][0][0].size, c, r)
                 txt = FIT_HELP["auto"] if real == "stretch" else "This shape is too different, so bars are added instead of squashing it."
+            if getattr(self, "target", "emoji") == "sticker":
+                txt = txt.replace("Each piece is", "The sticker is").replace("every piece", "the sticker")
             self.fit_help.configure(text=txt)
 
         def on_option(self):
@@ -1684,7 +1743,7 @@ def run_gui(start_hidden=False):
             else:
                 self.em_empty.place(relx=0.5, rely=0.45, anchor="center")
             if n > 1:
-                self.save_all_btn.grid(row=8, column=0, padx=18, pady=(8, 0), sticky="ew")
+                self.save_all_btn.grid(row=10, column=0, padx=18, pady=(8, 0), sticky="ew")
             else:
                 self.save_all_btn.grid_forget()
             self.all_var.set(False)
@@ -1861,8 +1920,11 @@ def run_gui(start_hidden=False):
                     text = f":{names[i]}:" if pt >= 70 else str(i + 1)
                     cv.create_text(x0 + px + pt // 2, y0 + py + pt + 12, text=text, fill=C["text"], font=font)
             fmt = "GIF" if len(frames) > 1 else "PNG"
-            self.info_lbl.configure(text=f"{'1 emote' if n == 1 else f'{n} pieces · {cols} wide × {rows} tall'}"
-                                         f" · square {fmt}{'s' if n > 1 else ''}")
+            if s["target"] == "sticker":
+                self.info_lbl.configure(text=f"Discord sticker · 320×320 {fmt} · up to 512 KB")
+            else:
+                self.info_lbl.configure(text=f"{'1 emote' if n == 1 else f'{n} pieces · {cols} wide × {rows} tall'}"
+                                             f" · square {fmt}{'s' if n > 1 else ''}")
             self.update_texts()
             if len(self.anim_imgs) > 1:
                 self._animate(0)
@@ -1920,7 +1982,7 @@ def run_gui(start_hidden=False):
                     try:
                         self.ensure_loaded(it)
                         res = make_emote(it["frames"], it["name"], out, s["mode"], s["cols"], s["rows"],
-                                         s["tile"], s["fit"], it["raw"] if keep else None)
+                                         s["tile"], s["fit"], it["raw"] if keep else None, s["target"])
                         results.append((it, res))
                         self.log_lines.append(f"  OK      {it['name']}: {len(res['files'])} file(s), {res['note']}")
                     except Exception as e:  # noqa
@@ -2838,8 +2900,8 @@ def run_gui(start_hidden=False):
         # ================= download queue (Browse 7TV + copied links) =================
         def enqueue_download(self, ref, on_done=None):
             s = self.settings()
-            snapshot = dict(mode="auto" if self.auto else "custom", cols=s["cols"], rows=s["rows"],
-                            tile=s["tile"], fit=s["fit"], out=self.out_dir(), keep=bool(self.cfg.get("keep_original")))
+            snapshot = dict(mode=s["mode"], cols=s["cols"], rows=s["rows"], tile=s["tile"], fit=s["fit"],
+                            out=self.out_dir(), keep=bool(self.cfg.get("keep_original")), target=s["target"])
             self.dlq.put((ref, snapshot, on_done))
 
         def _dl_worker(self):
@@ -2849,7 +2911,7 @@ def run_gui(start_hidden=False):
                     raw, ext = download_emote(ref)
                     frames = load_frames(raw)
                     res = make_emote(frames, ref.name, sn["out"], sn["mode"], sn["cols"], sn["rows"],
-                                     sn["tile"], sn["fit"], (raw, ext) if sn["keep"] else None)
+                                     sn["tile"], sn["fit"], (raw, ext) if sn["keep"] else None, sn["target"])
                     err = None
                 except Exception as e:  # noqa
                     res, err = None, e
@@ -2921,8 +2983,8 @@ def run_gui(start_hidden=False):
             self.clip_ref = ref
             c, r = auto_grid(w, h) if self.auto else (self.cols_var.get(), self.rows_var.get())
             n = c * r
-            self.banner_lbl.configure(text=f"Copied from 7TV:  {ref.name}   ·   {w}×{h}   →   "
-                                           f"{'1 emote' if n == 1 else f'{n} pieces'}")
+            what = "sticker" if self.target == "sticker" else ("1 emote" if n == 1 else f"{n} pieces")
+            self.banner_lbl.configure(text=f"Copied from 7TV:  {ref.name}   ·   {w}×{h}   →   {what}")
             if thumb is not None:
                 th = thumb.copy()
                 th.thumbnail((64, 28))
@@ -3097,9 +3159,10 @@ def run_gui(start_hidden=False):
                 name = ref.name if len(ref.name) <= 17 else ref.name[:16] + "…"
                 cv.create_text(x + CW // 2, y + px(8) + TH + px(17), text=name, fill=C["text"], font=F_NAME,
                                tags=(f"openarea{i}",))
-                tag = f"{'GIF' if ref.animated else 'PNG'} · " + ("1 emote" if n == 1 else f"{n} pieces")
+                tag = f"{'GIF' if ref.animated else 'PNG'} · " + (
+                    "sticker" if self.target == "sticker" else ("1 emote" if n == 1 else f"{n} pieces"))
                 cv.create_text(x + CW // 2, y + px(8) + TH + px(36), text=tag, font=F_TAG,
-                               fill=C["accent"] if n > 1 else C["faint"])
+                               fill=C["accent"] if n > 1 and self.target != "sticker" else C["faint"])
                 by1, by2 = y + CH - px(38), y + CH - px(10)
                 mid = x + CW // 2
                 button(x + px(8), by1, mid - px(3), by2, "Open", C["card"], C["border"],
@@ -3797,6 +3860,7 @@ def run_cli(argv):
     ap.add_argument("--out", default=default_out_dir(), help="output folder")
     ap.add_argument("--name", help="emote name (single emote only)")
     ap.add_argument("--keep-original", action="store_true")
+    ap.add_argument("--sticker", action="store_true", help="make a 320x320 Discord sticker (max 512 KB) instead of emoji")
     ap.add_argument("--version", action="version", version=f"Emotes Downloader {__version__}")
     a = ap.parse_args(argv)
 
@@ -3827,7 +3891,7 @@ def run_cli(argv):
         try:
             raw, ext = get()
             res = make_emote(load_frames(raw), name, out, mode, cols, rows, a.size, a.fit,
-                             (raw, ext) if a.keep_original else None)
+                             (raw, ext) if a.keep_original else None, "sticker" if a.sticker else "emoji")
             sizes = ", ".join(f"{p.name} {s // 1024}KB" for p, s in res["files"])
             print(f"OK  {name}: {sizes}  [{res['note']}]")
         except Exception as e:  # noqa

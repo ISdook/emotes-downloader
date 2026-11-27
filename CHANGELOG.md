@@ -2,6 +2,13 @@
 
 Every release gets an entry here. The release build fails without one, and the text becomes the GitHub release notes and the app's "What's new" window.
 
+## v1.6.0 — 2026-11-27
+- New "Make it a: Emoji / Sticker" choice on the Emotes tab
+  - **Emoji**: 128×128 pieces up to 256 KB, cut into pieces like before
+  - **Sticker**: exactly 320×320 and up to 512 KB, the size Discord needs for stickers. It's never cut into pieces, and it's saved in a "Stickers" folder
+- Better quality for wide animated emotes with transparent bars: they now store only what changes between frames, so they keep more frames
+- Command line: new --sticker option
+
 ## v1.5.2 — 2026-11-27
 - Settings: long descriptions now wrap instead of getting cut off
 - Converter: the Before / After boxes are the same width and show their full text
