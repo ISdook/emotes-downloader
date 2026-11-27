@@ -39,7 +39,7 @@ except ImportError:  # pragma: no cover
     print("Pillow is missing. Install it with:  python -m pip install pillow")
     sys.exit(1)
 
-__version__ = "1.9.0"
+__version__ = "1.9.1"
 UA = f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) emotes-downloader/{__version__}"
 GITHUB_REPO = "ISdook/emotes-downloader"
 PORTABLE_ASSET = "Emotes-Downloader-Portable.exe"
@@ -53,6 +53,7 @@ API = "https://7tv.io/v3"
 DISCORD_LIMIT = 256 * 1024          # Discord emoji upload limit
 SAFE_LIMIT = DISCORD_LIMIT - 2048    # small safety margin
 MAX_GRID = 10
+THUMB_CACHE_MAX = 300                # Browse 7TV previews kept in memory (animated ones can be several MB each)
 CONFIG_PATH = Path.home() / ".emotes_downloader.json"
 
 LANCZOS = Image.Resampling.LANCZOS
@@ -290,11 +291,39 @@ def load_frames(data):
     return frames
 
 
+# Arabic (and Persian) letters in Latin letters, for emote names: Discord only takes A-Z, a-z, 0-9 and _.
+# Hamza seats (أ إ آ ؤ ئ) and harakat are split off by NFKD first, so only base letters are needed here.
+ARABIC_LATIN = {
+    "ا": "a", "ب": "b", "ت": "t", "ث": "th", "ج": "j", "ح": "h", "خ": "kh", "د": "d", "ذ": "dh",
+    "ر": "r", "ز": "z", "س": "s", "ش": "sh", "ص": "s", "ض": "d", "ط": "t", "ظ": "z", "ع": "a",
+    "غ": "gh", "ف": "f", "ق": "q", "ك": "k", "ل": "l", "م": "m", "ن": "n", "ه": "h", "ة": "a",
+    "و": "w", "ي": "y", "ى": "a", "ء": "", "ـ": "",
+    "پ": "p", "چ": "ch", "ژ": "zh", "ک": "k", "گ": "g", "ی": "y",
+    **{chr(0x660 + i): str(i) for i in range(10)}, **{chr(0x6F0 + i): str(i) for i in range(10)},
+}
+
+
 def sanitize_name(name, reserve_digits=0):
-    n = re.sub(r"[^A-Za-z0-9_]", "_", name or "").strip("_") or "emote"
-    if len(n) < 2:
-        n = n + "_"
-    return n[: 32 - reserve_digits]
+    """A file and Discord emote name: only A-Z, a-z, 0-9 and _, at most 32 characters (minus room for
+    piece numbers). Names with other letters (Arabic, accents, emoji) get Arabic spelled in Latin letters
+    plus a short tag made from the full name. Before, they all became "emote" and overwrote each other.
+    The tag is the same every time, so saving the same emote again still gives the same file name."""
+    import hashlib
+    import unicodedata
+    name = name or ""
+    if all(ord(ch) < 128 for ch in name):
+        n = re.sub(r"[^A-Za-z0-9_]", "_", name).strip("_") or "emote"
+        if len(n) < 2:
+            n = n + "_"
+        return n[: 32 - reserve_digits]
+    plain = "".join(ch for ch in unicodedata.normalize("NFKD", name) if not unicodedata.combining(ch))
+    latin = "".join(ARABIC_LATIN.get(ch, ch) for ch in plain)
+    n = re.sub(r"[^A-Za-z0-9_]", "_", latin).strip("_")
+    n = re.sub(r"_+", "_", n)
+    digest = hashlib.md5(name.encode("utf-8")).digest()
+    tag = "".join(chr(ord("a") + b % 26) for b in digest[:4])   # letters only: piece numbers follow it
+    n = n[: 32 - reserve_digits - 5].rstrip("_") or "emote"
+    return f"{n}_{tag}"
 
 
 def folder_name(title):
@@ -2185,7 +2214,8 @@ def run_gui(start_hidden=False):
             self.saved_count = 0
             self.toasts = []
             self.browse_win = None
-            self.thumb_cache = {}
+            from collections import OrderedDict
+            self.thumb_cache = OrderedDict()   # Browse 7TV previews; only the last THUMB_CACHE_MAX are kept
             self.dlq = queue.Queue()
             self.discord = DiscordLink(self.cfg, lambda: save_config(self.cfg))
             self._last_clip = None
@@ -2736,6 +2766,12 @@ def run_gui(start_hidden=False):
                 return
             ids = {id(it) for it in gone}
             self.items = [it for it in self.items if id(it) not in ids]
+            lru = getattr(self, "_lru", None)
+            for it in gone:                              # free what was removed
+                if lru is not None:
+                    lru.pop(id(it), None)
+                if not it.get("_loading"):
+                    it["frames"] = it["raw"] = None
             if self.current is not None and id(self.current) in ids:
                 self.current = None
             self._rebuild_rows()
@@ -2748,6 +2784,10 @@ def run_gui(start_hidden=False):
             self.say(f"Removed {len(gone)} from the list.", "info")
 
         def em_clear(self):
+            self._sel_gen = getattr(self, "_sel_gen", 0) + 1   # a file still opening must not show up afterwards
+            for it in (getattr(self, "_lru", None) or {}).values():
+                it["frames"] = it["raw"] = None
+            self._lru = None
             self.items, self.current, self.set_title = [], None, None
             self._rebuild_rows()
             self._name_lock = True
@@ -2767,18 +2807,20 @@ def run_gui(start_hidden=False):
             self.save_all_btn.configure(text=f"Save selected ({k})" if k else f"Save all ({len(self.items)})")
 
         def ensure_loaded(self, it):
-            if it["frames"] is None:
+            """Returns (frames, raw). Use these, not it["frames"]/it["raw"]: on another thread the
+            memory limit (_remember_loaded) can free those at any moment."""
+            raw, frames = it["raw"], it["frames"]       # raw first: freeing clears frames, then raw
+            if frames is None or raw is None:
                 if it["path"]:
                     pth = Path(it["path"])
-                    raw = pth.read_bytes()
-                    ext = pth.suffix.lstrip(".").lower() or "img"
-                    it["raw"] = (raw, ext)
-                    it["frames"] = load_any(pth)
+                    raw = (pth.read_bytes(), pth.suffix.lstrip(".").lower() or "img")
+                    frames = load_any(pth)
                 else:
-                    raw, ext = download_emote(it["ref"])
-                    it["raw"] = (raw, ext)
-                    it["frames"] = load_frames(raw)
-            return it
+                    data, ext = download_emote(it["ref"])
+                    raw = (data, ext)
+                    frames = load_frames(data)
+                it["raw"], it["frames"] = raw, frames
+            return frames, raw
 
         def select_item(self, idx):
             if not 0 <= idx < len(self.items):
@@ -2796,6 +2838,8 @@ def run_gui(start_hidden=False):
             self.say(f"{'Downloading' if it['ref'] else 'Opening'} {it['name']}…", "busy")
 
             def job():
+                if gen != self._sel_gen:                     # you already clicked another file: don't open this one
+                    return
                 try:
                     self.ensure_loaded(it)
                     err = None
@@ -2807,6 +2851,8 @@ def run_gui(start_hidden=False):
 
                 def done():
                     if gen != self._sel_gen:                 # you already clicked another file
+                        if not err:
+                            self._remember_loaded(it)        # count it toward the 40, so it gets freed later
                         return
                     if err:
                         self.say(f"Couldn't open {it['name']}: {err}", "err")
@@ -2844,6 +2890,10 @@ def run_gui(start_hidden=False):
             """Keep the frames of the last 40 files you looked at; older ones are freed (re-opened when needed),
             so a list of 1000s of GIFs doesn't fill up your memory."""
             from collections import OrderedDict
+            if not any(x is it for x in self.items):    # removed from the list meanwhile: just free it
+                if it is not self.current and not it.get("_loading"):
+                    it["frames"] = it["raw"] = None
+                return
             lru = getattr(self, "_lru", None)
             if lru is None:
                 lru = self._lru = OrderedDict()
@@ -2986,9 +3036,9 @@ def run_gui(start_hidden=False):
             def save_one(it):
                 was_loaded = it["frames"] is not None
                 try:
-                    self.ensure_loaded(it)
-                    res = make_emote(it["frames"], it["name"], out, s["mode"], s["cols"], s["rows"],
-                                     s["tile"], s["fit"], it["raw"] if keep else None, s["target"])
+                    frames, raw = self.ensure_loaded(it)     # local copies: the UI may free it["frames"] meanwhile
+                    res = make_emote(frames, it["name"], out, s["mode"], s["cols"], s["rows"],
+                                     s["tile"], s["fit"], raw if keep else None, s["target"])
                     self.log_lines.append(f"  OK      {it['name']}: {len(res['files'])} file(s), {res['note']}")
                     return it, res
                 except Exception as e:  # noqa
@@ -3006,7 +3056,9 @@ def run_gui(start_hidden=False):
                 locks, guard, count = {}, threading.Lock(), [0]
 
                 def run(it):
-                    key = (it["name"] or "").lower()
+                    # same key as the files make_emote writes (sanitize_name, short enough for piece numbers),
+                    # so two emotes that end up with the same file names never write at the same time
+                    key = sanitize_name(it["name"], 3).lower()
                     with guard:
                         lk = locks.setdefault(key, threading.Lock())
                     with lk:
@@ -3886,6 +3938,7 @@ def run_gui(start_hidden=False):
                                     limit=self.cv_limit.get(), fmt=self.cv_fmt.get(), fit=self.cv_fit.get(),
                                     scale=self.cv_scale.get(), fps=self.cv_fps.get(), colors=int(self.cv_colors.get()))
             save_config(self.cfg)
+            self.conv_gen += 1                    # previews already running used the old options: ignore them
             for it in self.conv_items:
                 it["result"] = None
                 if it.get("status") in ("done", "over"):
@@ -3925,7 +3978,10 @@ def run_gui(start_hidden=False):
 
         def conv_remove(self):
             sel = sorted(self.conv_list.curselection(), reverse=True)
+            lru = getattr(self, "_conv_lru", None)
             for i in sel:
+                if lru is not None:
+                    lru.pop(id(self.conv_items[i]), None)
                 del self.conv_items[i]
             self.conv_sel = None
             self._conv_refresh_list()
@@ -3934,6 +3990,7 @@ def run_gui(start_hidden=False):
         def conv_clear(self):
             self.conv_items = []
             self.conv_sel = None
+            self._conv_lru = None
             self._conv_refresh_list()
             self._conv_draw()
 
@@ -4011,15 +4068,22 @@ def run_gui(start_hidden=False):
             self.conv_after.configure(text="converting…")
 
             def job():
+                if gen != self.conv_gen:                     # you already picked another file or option
+                    return
                 try:
-                    if it["frames"] is None:
-                        it["frames"] = load_any(it["path"])
-                    res = convert_media(it["frames"], **opts)
+                    frames = it["frames"]                    # local copy: a batch convert may free it["frames"]
+                    if frames is None:
+                        frames = it["frames"] = load_any(it["path"])
+                    res = convert_media(frames, **opts)
                     err = None
                 except Exception as e:  # noqa
                     res, err = None, e
 
                 def done():
+                    if gen != self.conv_gen:                 # outdated preview: never keep its result
+                        if it["frames"] is not None:
+                            self._conv_remember(it)
+                        return
                     if isinstance(err, NeedFFmpeg):
                         self.conv_after.configure(text="Video support isn't installed yet.")
                         self.ask_ffmpeg(self._conv_preview)
@@ -4030,11 +4094,31 @@ def run_gui(start_hidden=False):
                         self._conv_refresh_list(keep_sel=True)
                         return
                     it["result"] = res
-                    if gen == self.conv_gen:
-                        self._conv_refresh_list(keep_sel=True)
-                        self._conv_draw()
+                    self._conv_remember(it)
+                    self._conv_refresh_list(keep_sel=True)
+                    self._conv_draw()
                 self.ui(done)
-            threading.Thread(target=job, daemon=True).start()
+            self._loader().submit(job)
+
+        def _conv_remember(self, it, keep=40):
+            """Converter version of _remember_loaded: keep the frames and previews of the last 40 files you
+            looked at; older ones are freed (re-opened when needed)."""
+            from collections import OrderedDict
+            lru = getattr(self, "_conv_lru", None)
+            if lru is None:
+                lru = self._conv_lru = OrderedDict()
+            lru.pop(id(it), None)
+            lru[id(it)] = it
+            sel = self.conv_items[self.conv_sel] if self.conv_sel is not None and \
+                self.conv_sel < len(self.conv_items) else None
+            while len(lru) > keep:
+                _, old = lru.popitem(last=False)
+                if old is sel:
+                    continue
+                r_ = old.get("result")
+                if r_ is not None and old.get("status") in ("done", "over"):
+                    old["summary"] = (len(r_["data"]) // 1024, r_["ext"], r_["over"])
+                old["frames"] = old["result"] = None
 
         def _conv_draw(self):
             if self.conv_anim:
@@ -4118,9 +4202,10 @@ def run_gui(start_hidden=False):
                     self.ui(lambda k=k, it=it: (self.say(f"Converting {k}/{len(items)}: {it['name']}", "busy"),
                                                 it.update(status="working"), self._conv_update_row(it)))
                     try:
-                        if it["frames"] is None:
-                            it["frames"] = load_any(it["path"])
-                        res = it.get("result") or convert_media(it["frames"], **opts)
+                        frames = it["frames"]                # local copy: a preview may free it["frames"]
+                        if frames is None:
+                            frames = it["frames"] = load_any(it["path"])
+                        res = it.get("result") or convert_media(frames, **opts)
                         it["result"] = res
                         out.mkdir(parents=True, exist_ok=True)
                         base = Path(it["path"]).stem
@@ -4137,8 +4222,8 @@ def run_gui(start_hidden=False):
                         it["status"] = "error"
                         bad += 1
                         self.log_lines.append(f"  FAILED  {it['name']}: {e}")
-                    sel_ = self.conv_items[self.conv_sel] if self.conv_sel is not None and \
-                        self.conv_sel < len(self.conv_items) else None
+                    cs, cur = self.conv_sel, self.conv_items     # read once: the list can change meanwhile
+                    sel_ = cur[cs] if cs is not None and cs < len(cur) else None
                     if it is not sel_ and len(items) > 1:     # free memory: 1000s of files don't fit in RAM at once
                         r_ = it.get("result")
                         if r_ is not None:
@@ -4164,8 +4249,15 @@ def run_gui(start_hidden=False):
             def run():
                 try:
                     r_ = job()
-                finally:
-                    self.ui(lambda: setattr(self, "_conv_running", False))
+                except Exception as e:  # noqa
+                    self.log_lines.append(f"  FAILED  converting stopped: {e}")
+
+                    def stopped(e=e):
+                        self._conv_running = False
+                        self._conv_refresh_list(keep_sel=True)    # puts the Convert button back
+                        self.say(f"Converting stopped: {e}. See Log.", "err")
+                    self.ui(stopped)
+                    return
                 self.ui(lambda: done(r_))
             threading.Thread(target=run, daemon=True).start()
 
@@ -5049,6 +5141,7 @@ def run_gui(start_hidden=False):
             def load_thumb(i, gen):
                 ref = st["refs"][i]
                 if ref.id in self.thumb_cache:
+                    self.thumb_cache.move_to_end(ref.id)
                     st["thumbs"][ref.id] = self.thumb_cache[ref.id]
                     place_thumb(i)
                     return
@@ -5060,9 +5153,12 @@ def run_gui(start_hidden=False):
                         im = fetch_thumb_frames(ref, box)
                     except Exception:
                         im = None
-                    self.thumb_cache[ref.id] = im
 
                     def show():
+                        if im is not None:                   # on the UI thread, so two threads never change the cache
+                            self.thumb_cache[ref.id] = im
+                            while len(self.thumb_cache) > THUMB_CACHE_MAX:
+                                self.thumb_cache.popitem(last=False)
                         if gen != st["gen"] or not top.winfo_exists() or im is None:
                             return
                         st["thumbs"][ref.id] = im

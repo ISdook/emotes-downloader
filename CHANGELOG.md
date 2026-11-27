@@ -2,6 +2,16 @@
 
 Every release gets an entry here. The release build fails without one, and the text becomes the GitHub release notes and the app's "What's new" window.
 
+## v1.9.1 — 2026-11-27
+- Fixed: emotes with Arabic names (or emoji, or letters like é) no longer overwrite each other when you save several. Before, they were all saved as "emote", so only the last one was kept
+  - Arabic names are now written in English letters, with a short tag so every emote gets its own name (for example ضحك becomes :dhk_ofem:). English names don't change
+- Fixed: in the Converter, changing an option right before pressing Convert could save files with the old settings
+- Fixed: going quickly through a big list (holding ↓, or clicking fast) no longer fills up your memory, and the file you stop on opens right away
+- The Converter now keeps only the last 40 files you looked at in memory, like the Emotes tab. Browse 7TV keeps the last 300 previews
+- Fixed: Save all could sometimes fail on a few emotes while you were looking through the list
+- Fixed: after Clear all, a file that was still opening could show up again and be saved
+- Fixed: if converting stopped because of an error, the Convert button stayed grey. Now it comes back and the reason is shown
+
 ## v1.9.0 — 2026-11-27
 - Big folders: add 1000+ files at once. Before, only the first 500 were added
 - The Files list is instant with thousands of files. It's drawn in one go instead of thousands of separate buttons (adding 500 files took about 7 seconds before)
