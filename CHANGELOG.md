@@ -2,6 +2,18 @@
 
 Every release gets an entry here. The release build fails without one, and the text becomes the GitHub release notes and the app's "What's new" window.
 
+## v1.5.0 — 2026-11-27
+- New **Converter** tab: turn any image, GIF, WebP, AVIF or video (MP4, WebM, MOV…) into a Discord emoji, a sticker or any custom size, all on your own PC
+  - Presets for Emoji (128×128, 256 KB) and Sticker (320×320, 512 KB), or a custom size and file size limit
+  - Output as GIF, PNG or WebP, with Fill / Stretch / Bars / Crop, Smooth or Pixel art scaling, colours and frame rate
+  - Live before/after preview with the final size, and batch converting into a "Converted" folder
+  - Video support downloads ffmpeg once (about 40 MB) the first time you open a video
+- Drag and drop: drop files, a whole folder or a 7TV link anywhere on the window
+- Redesigned Settings window with pages (General, Saving, Updates, About); changes save instantly
+- New option: start with Windows (quietly in the tray)
+- Fixed: the Auto button can now be switched off again
+- The Emotes tab can also open video files
+
 ## v1.4.1 — 2026-11-27
 - Fixed: the Browse 7TV window glitched and smeared while scrolling. It's rebuilt to scroll smoothly, and it loads more emotes by itself as you reach the bottom
 - Fixed: icons showed as empty boxes on Windows (Browse 7TV, Save and others). All icons are now drawn by the app itself

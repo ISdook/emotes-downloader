@@ -49,7 +49,32 @@ The full history is in [CHANGELOG.md](CHANGELOG.md).
    - With a set loaded, tick the emotes you want and press **Save selected**. With nothing ticked, the button says **Save all**.
 6. Upload the pieces to your server (Server Settings → Emoji), then type them next to each other in Discord, like `:OdaMeeting1::OdaMeeting2::OdaMeeting3::OdaMeeting4:`.
 
-**Tray icon:** when you close the window, the app keeps running in the system tray by default. Click the tray icon (left or right) to open the tray panel. It shows the app's status and the last copied 7TV emote with a **Save** button, plus Browse 7TV, Open emotes folder, Settings, Check for updates, **Open app** and **Exit**. You can turn this off in **⚙ Settings**, along with the piece size, keeping the original file, the copied-link notice, and the update options.
+## Converter
+
+The **Converter** tab is for doing it all yourself, without uploading your files to some random website. It accepts any image, GIF, WebP, AVIF or video (MP4, WebM, MOV…).
+
+1. Drop files or a whole folder on the window, or use **Add files** / **Add folder**.
+2. Pick what to make:
+   - **Emoji**: 128×128, up to 256 KB.
+   - **Sticker**: 320×320, up to 512 KB.
+   - **Custom**: any size and file size limit.
+3. Fine-tune:
+   - **Format**: Auto, GIF, PNG or WebP.
+   - **Fit**: Fill, Stretch, Bars or Crop.
+   - **Scaling**: Smooth, or **Pixel art** for crisp pixels.
+   - **Colours** and **Frame rate**.
+4. Check the **Before / After** preview. It shows the final size, and the size turns orange if the file is still over the limit.
+5. Press **Convert**. Files are saved to a `Converted` folder inside your save folder.
+
+The first time you open a video, the app offers a one-time download of ffmpeg (about 40 MB, from PyPI) to read it. Images and GIFs don't need it.
+
+## Drag and drop
+
+Drop files, a folder, or a 7TV link anywhere on the window:
+- On the **Emotes** tab, they're loaded to be cut. A folder becomes a list you can save all at once.
+- On the **Converter** tab, they're added to the list.
+
+**Tray icon:** when you close the window, the app keeps running in the system tray by default. Click the tray icon (left or right) to open the tray panel. It shows the app's status and the last copied 7TV emote with a **Save** button, plus Browse 7TV, Open emotes folder, Settings, Check for updates, **Open app** and **Exit**. **Settings** has pages for General (tray, start with Windows, copied-link notice), Saving (folder, piece size, keep originals), Updates and About.
 
 ## What it does to the files
 

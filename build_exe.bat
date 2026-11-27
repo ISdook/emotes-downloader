@@ -5,15 +5,15 @@ set "PY=py"
 where py >nul 2>nul || set "PY=python"
 
 echo Installing build tools...
-%PY% -m pip install --upgrade pillow customtkinter pystray pyinstaller || goto fail
+%PY% -m pip install --upgrade pillow customtkinter pystray tkinterdnd2 pyinstaller || goto fail
 
 echo.
 echo [1/3] Building the portable .exe...
-%PY% -m PyInstaller --noconfirm --clean --onefile --windowed --name Emotes-Downloader-Portable --icon assets\icon.ico --add-data "assets;assets" --add-data "CHANGELOG.md;." --collect-data customtkinter --hidden-import PIL._tkinter_finder --hidden-import pystray._win32 emotes_downloader.py || goto fail
+%PY% -m PyInstaller --noconfirm --clean --onefile --windowed --name Emotes-Downloader-Portable --icon assets\icon.ico --add-data "assets;assets" --add-data "CHANGELOG.md;." --collect-data customtkinter --hidden-import PIL._tkinter_finder --hidden-import pystray._win32 --collect-all tkinterdnd2 emotes_downloader.py || goto fail
 
 echo.
 echo [2/3] Building the app folder for the installer...
-%PY% -m PyInstaller --noconfirm --onedir --windowed --name "Emotes Downloader" --icon assets\icon.ico --add-data "assets;assets" --add-data "CHANGELOG.md;." --collect-data customtkinter --hidden-import PIL._tkinter_finder --hidden-import pystray._win32 --distpath dist\app --workpath build\app emotes_downloader.py || goto fail
+%PY% -m PyInstaller --noconfirm --onedir --windowed --name "Emotes Downloader" --icon assets\icon.ico --add-data "assets;assets" --add-data "CHANGELOG.md;." --collect-data customtkinter --hidden-import PIL._tkinter_finder --hidden-import pystray._win32 --collect-all tkinterdnd2 --distpath dist\app --workpath build\app emotes_downloader.py || goto fail
 
 echo.
 echo [3/3] Building the setup .exe...

@@ -8,7 +8,7 @@ Emotes Downloader - 7TV -> Discord
 * Optionally cuts wide/big emotes into pieces (KEKW1, KEKW2, ...) and
   writes the text to paste in Discord (":KEKW1::KEKW2:").
 
-Needs: pillow, customtkinter, pystray  (run.bat installs them)
+Needs: pillow, customtkinter, pystray, tkinterdnd2  (run.bat installs them)
 
 Run with no arguments for the window, or use the command line:
     python emotes_downloader.py https://7tv.app/emotes/<id> --split auto
@@ -36,7 +36,7 @@ except ImportError:  # pragma: no cover
     print("Pillow is missing. Install it with:  python -m pip install pillow")
     sys.exit(1)
 
-__version__ = "1.4.1"
+__version__ = "1.5.0"
 UA = f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) emotes-downloader/{__version__}"
 GITHUB_REPO = "ISdook/emotes-downloader"
 PORTABLE_ASSET = "Emotes-Downloader-Portable.exe"
@@ -299,13 +299,15 @@ def piece_names(name, count):
     return [f"{base}{i}" for i in range(1, count + 1)]
 
 
-def fit_frame(img, W, H, fit):
+def fit_frame(img, W, H, fit, method=None):
+    if method is None:  # (NEAREST is 0, so don't use "or" here)
+        method = LANCZOS
     w, h = img.size
     if fit == "stretch":
-        return img.resize((W, H), LANCZOS)
+        return img.resize((W, H), method)
     sc = min(W / w, H / h) if fit == "contain" else max(W / w, H / h)
     nw, nh = max(1, round(w * sc)), max(1, round(h * sc))
-    r = img.resize((nw, nh), LANCZOS) if (nw, nh) != (w, h) else img
+    r = img.resize((nw, nh), method) if (nw, nh) != (w, h) else img
     if fit == "cover":
         x, y = (nw - W) // 2, (nh - H) // 2
         return r.crop((x, y, x + W, y + H))
@@ -473,6 +475,230 @@ def _note(colors=256, step=1, scale=1.0, tile=128, frames=1):
     if scale >= 1.0 and step == 1 and colors >= 255:
         return f"full quality, {px}×{px} px"
     return "fit under 256 KB: " + ", ".join(bits)
+
+
+# --------------------------------------------------------------------------
+# Converter: any image / GIF / video -> emote, sticker or custom format
+# --------------------------------------------------------------------------
+
+IMAGE_EXT = {".gif", ".png", ".apng", ".webp", ".jpg", ".jpeg", ".jfif", ".bmp", ".avif", ".tif", ".tiff", ".ico"}
+VIDEO_EXT = {".mp4", ".webm", ".mov", ".mkv", ".avi", ".m4v", ".flv", ".wmv", ".mpg", ".mpeg"}
+MEDIA_EXT = IMAGE_EXT | VIDEO_EXT
+PRESETS = {  # name: (width, height, size limit KB)
+    "Emoji": (128, 128, 256),
+    "Sticker": (320, 320, 512),
+    "Custom": None,
+}
+
+
+class NeedFFmpeg(RuntimeError):
+    """Video support needs ffmpeg, which is downloaded once on first use."""
+
+
+def data_dir():
+    if sys.platform.startswith("win"):
+        base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
+        return base / "EmotesDownloader"
+    return Path.home() / ".local" / "share" / "emotes-downloader"
+
+
+def _local_ffmpeg():
+    return data_dir() / ("ffmpeg.exe" if sys.platform.startswith("win") else "ffmpeg")
+
+
+def ffmpeg_exe():
+    local = _local_ffmpeg()
+    if local.exists():
+        return str(local)
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        import shutil
+        return shutil.which("ffmpeg")
+
+
+def install_ffmpeg(progress=None):
+    """One-time download of ffmpeg (the build that the imageio-ffmpeg package ships on PyPI)."""
+    import zipfile
+    info = json.loads(http_get("https://pypi.org/pypi/imageio-ffmpeg/json", timeout=30, site="PyPI").decode("utf-8"))
+    import platform
+    arm = platform.machine().lower() in ("arm64", "aarch64")
+    if sys.platform.startswith("win"):
+        tags = ["win_arm64"] if arm else ["win_amd64"]
+    elif sys.platform == "darwin":
+        tags = ["arm64"] if arm else ["x86_64"]
+    else:
+        tags = ["aarch64"] if arm else ["x86_64"]
+    plat = "win" if sys.platform.startswith("win") else "macosx" if sys.platform == "darwin" else "linux"
+    wheel = next((u for u in info.get("urls", []) if u["filename"].endswith(".whl") and plat in u["filename"]
+                  and any(t in u["filename"] for t in tags)), None)
+    if wheel is None and sys.platform.startswith("win"):  # Windows on ARM can run the x64 build
+        wheel = next((u for u in info.get("urls", []) if u["filename"].endswith("win_amd64.whl")), None)
+    if not wheel:
+        raise RuntimeError("Couldn't find an ffmpeg download for this system.")
+    data = download(wheel["url"], progress, timeout=900)
+    with zipfile.ZipFile(io.BytesIO(data)) as z:
+        member = next((n for n in z.namelist() if "/binaries/ffmpeg" in n and not n.endswith((".py", ".md"))), None)
+        if not member:
+            raise RuntimeError("The ffmpeg download didn't contain ffmpeg.")
+        dest = _local_ffmpeg()
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_suffix(".part")
+        tmp.write_bytes(z.read(member))
+        os.replace(tmp, dest)
+    if not sys.platform.startswith("win"):
+        dest.chmod(0o755)
+    return str(dest)
+
+
+def load_video(path, fps=30, max_seconds=20, max_side=512, max_frames=600):
+    """Decode a video clip into [(RGBA image, duration_ms)] using ffmpeg."""
+    exe = ffmpeg_exe()
+    if not exe:
+        raise NeedFFmpeg("Video files need ffmpeg (a one-time download).")
+    vf = f"fps={fps},scale={max_side}:{max_side}:force_original_aspect_ratio=decrease:flags=lanczos"
+    cmd = [exe, "-v", "error", "-i", str(path), "-t", str(max_seconds), "-an", "-vf", vf,
+           "-f", "image2pipe", "-vcodec", "png", "-"]
+    flags = subprocess.CREATE_NO_WINDOW if sys.platform.startswith("win") else 0
+    r = subprocess.run(cmd, capture_output=True, timeout=300, creationflags=flags)
+    sig = b"\x89PNG\r\n\x1a\n"
+    parts = r.stdout.split(sig)[1:]
+    if not parts:
+        msg = r.stderr.decode("utf-8", "replace").strip().splitlines()
+        raise RuntimeError("Couldn't read this video" + (f": {msg[-1]}" if msg else "."))
+    dur = max(20, round(1000 / fps))
+    return [(Image.open(io.BytesIO(sig + p)).convert("RGBA"), dur) for p in parts[:max_frames]]
+
+
+def load_any(path):
+    """Frames from any supported file (image, animated image or video)."""
+    path = Path(path)
+    if path.suffix.lower() in VIDEO_EXT:
+        return load_video(path)
+    return load_frames(path.read_bytes())
+
+
+def collect_media(paths, videos=True, limit=500):
+    """Expand dropped files/folders into a list of media files."""
+    ok = MEDIA_EXT if videos else IMAGE_EXT
+    out = []
+    for p in paths:
+        p = Path(p)
+        if p.is_dir():
+            found = sorted(f for f in p.iterdir() if f.is_file() and f.suffix.lower() in ok)
+            if not found:  # look one level deeper
+                found = sorted(f for d in p.iterdir() if d.is_dir() for f in d.iterdir()
+                               if f.is_file() and f.suffix.lower() in ok)
+            out.extend(found)
+        elif p.is_file() and p.suffix.lower() in ok:
+            out.append(p)
+        if len(out) >= limit:
+            break
+    return out[:limit]
+
+
+def retime(frames, fps):
+    """Resample an animation to a frame rate (fewer frames = smaller files)."""
+    if not fps or len(frames) < 2:
+        return frames
+    step = 1000.0 / fps
+    total = sum(d for _, d in frames)
+    out, t, idx, end = [], 0.0, 0, frames[0][1]
+    while t < total - 1e-6:
+        while t >= end and idx < len(frames) - 1:
+            idx += 1
+            end += frames[idx][1]
+        if out and out[-1][0] is frames[idx][0]:
+            out[-1][1] += step
+        else:
+            out.append([frames[idx][0], step])
+        t += step
+    return [(im, max(20, int(round(d)))) for im, d in out]
+
+
+def _encode_webp(frames, quality):
+    buf = io.BytesIO()
+    imgs = [f for f, _ in frames]
+    kw = dict(quality=quality, method=4)
+    if len(imgs) > 1:
+        kw.update(save_all=True, append_images=imgs[1:], duration=[d for _, d in frames], loop=0)
+    imgs[0].save(buf, "WEBP", **kw)
+    return buf.getvalue()
+
+
+def convert_media(frames, width, height, fmt="auto", fit="auto", pixel=False, colors=256, fps=None, limit_kb=256):
+    """Resize/convert frames. Returns dict(data, ext, note, size, frames)."""
+    method = Image.Resampling.NEAREST if pixel else LANCZOS
+    animated = len(frames) > 1
+    fr = retime(frames, fps) if animated else frames[:1]
+    fr = [(fit_frame(im, width, height, resolve_fit(fit, im.width, im.height, width, height), method), d) for im, d in fr]
+    fmt = (("gif" if animated else "png") if fmt == "auto" else fmt).lower()
+    limit = limit_kb * 1024 if limit_kb else None
+    colors = max(2, min(256, int(colors)))
+    notes = []
+
+    def fits(b):
+        return limit is None or len(b) <= limit
+
+    def shrink(f, scale):
+        size = (max(1, round(width * scale)), max(1, round(height * scale)))
+        return [(im.resize(size, method), d) for im, d in f]
+
+    data = None
+    if fmt == "gif":
+        tiers = [(colors, 1, 1.0, 0)]
+        if limit:
+            for c in (colors, 192, 128, 96, 64, 48, 32):
+                if c <= colors:
+                    tiers += [(c, 1, 1.0, 10), (c, 1, 1.0, 20)]
+            tiers += [(64, 2, 1.0, 20), (48, 2, 1.0, 24), (48, 3, 1.0, 28),
+                      (64, 1, 0.75, 20), (48, 2, 0.75, 24), (48, 2, 0.5, 24), (32, 3, 0.5, 28), (32, 4, 0.375, 32)]
+        for c, step, scale, thr in tiers:
+            src = fr if scale >= 1 else shrink(fr, scale)
+            data = encode_gif(src, c, step, 1.0, thr if len(src) > 1 else 0)
+            if fits(data):
+                if c < colors:
+                    notes.append(f"{c} colours")
+                if step > 1:
+                    notes.append(f"1 in {step} frames")
+                if scale < 1:
+                    notes.append(f"{round(width * scale)}×{round(height * scale)} px")
+                break
+    elif fmt == "png":
+        img = fr[0][0]
+        if animated:
+            notes.append("first frame only (PNG isn't animated on Discord)")
+        for c, scale in ([(colors, 1.0)] + ([(128, 1.0), (64, 1.0), (256, .75), (128, .5)] if limit else [])):
+            im = img if scale >= 1 else img.resize((max(1, round(width * scale)), max(1, round(height * scale))), method)
+            if c < 256:
+                im = im.quantize(colors=c, method=Image.Quantize.FASTOCTREE, dither=Image.Dither.FLOYDSTEINBERG)
+            buf = io.BytesIO()
+            im.save(buf, "PNG", optimize=True)
+            data = buf.getvalue()
+            if fits(data):
+                if c < colors or (c < 256 and colors >= 256):
+                    notes.append(f"{c} colours")
+                if scale < 1:
+                    notes.append(f"{round(width * scale)}×{round(height * scale)} px")
+                break
+    elif fmt == "webp":
+        for q, scale in ([(90, 1.0)] + ([(80, 1), (70, 1), (60, 1), (50, 1), (40, 1), (60, .75), (50, .5)] if limit else [])):
+            src = fr if scale >= 1 else shrink(fr, scale)
+            data = _encode_webp(src, q)
+            if fits(data):
+                if q < 90:
+                    notes.append(f"quality {q}")
+                if scale < 1:
+                    notes.append(f"{round(width * scale)}×{round(height * scale)} px")
+                break
+    else:
+        raise ValueError(f"Unknown format: {fmt}")
+    if not fits(data):
+        notes.append(f"still over {limit_kb} KB")
+    out = Image.open(io.BytesIO(data))
+    return dict(data=data, ext=fmt, note=", ".join(notes) or "full quality", size=out.size,
+                frames=getattr(out, "n_frames", 1), over=not fits(data))
 
 
 def make_emote(frames, name, out_dir, mode="none", cols=1, rows=1, tile=128,
@@ -719,7 +945,7 @@ def apply_update(info, progress=None):
     os.replace(tmp, script)
     py = Path(sys.executable)
     try:
-        subprocess.run([str(py), "-m", "pip", "install", "-q", "pillow", "customtkinter", "pystray"], timeout=180,
+        subprocess.run([str(py), "-m", "pip", "install", "-q", "pillow", "customtkinter", "pystray", "tkinterdnd2"], timeout=180,
                        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform.startswith("win") else 0)
     except Exception:
         pass
@@ -788,6 +1014,45 @@ def save_config(cfg):
         CONFIG_PATH.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
     except Exception:
         pass
+
+
+def _autostart_cmd():
+    if is_frozen():
+        return f'"{Path(sys.executable).resolve()}" --tray'
+    py = Path(sys.executable)
+    pyw = py.with_name("pythonw.exe")
+    return f'"{pyw if pyw.exists() else py}" "{Path(__file__).resolve()}" --tray'
+
+
+def autostart_enabled():
+    if not sys.platform.startswith("win"):
+        return False
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run") as k:
+            winreg.QueryValueEx(k, "EmotesDownloader")
+            return True
+    except Exception:
+        return False
+
+
+def set_autostart(on):
+    if not sys.platform.startswith("win"):
+        return False
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", 0,
+                            winreg.KEY_SET_VALUE) as k:
+            if on:
+                winreg.SetValueEx(k, "EmotesDownloader", 0, winreg.REG_SZ, _autostart_cmd())
+            else:
+                try:
+                    winreg.DeleteValue(k, "EmotesDownloader")
+                except FileNotFoundError:
+                    pass
+        return True
+    except Exception:
+        return False
 
 
 def open_folder(path):
@@ -878,7 +1143,7 @@ def _import_ctk():
     except ImportError:
         pass
     if not is_frozen():  # Python version: install the UI library on the fly
-        subprocess.run([sys.executable, "-m", "pip", "install", "-q", "customtkinter", "pystray"],
+        subprocess.run([sys.executable, "-m", "pip", "install", "-q", "customtkinter", "pystray", "tkinterdnd2"],
                        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform.startswith("win") else 0)
         try:
             import customtkinter as ctk
@@ -894,11 +1159,11 @@ def _import_ctk():
     sys.exit(1)
 
 
-def run_gui():
+def run_gui(start_hidden=False):
     ctk = _import_ctk()
     import tkinter as tk
     from tkinter import filedialog
-    from PIL import ImageTk
+    from PIL import ImageTk, ImageDraw
     try:
         import PIL._tkinter_finder  # noqa: F401  (makes PyInstaller bundle it; ImageTk needs it)
     except ImportError:
@@ -1031,8 +1296,16 @@ def run_gui():
             self.label(top, "7TV emotes → Discord, resized and cut into pieces", 12, "muted").grid(
                 row=1, column=1, sticky="w")
 
+            self.tab = "Emotes"
+            self.tab_seg = ctk.CTkSegmentedButton(
+                top, values=["Emotes", "Converter"], command=self.switch_tab, height=36, corner_radius=12,
+                font=self.F(13, True), fg_color=C["card"], selected_color=C["accent"],
+                selected_hover_color=C["accent_hover"], unselected_color=C["card"],
+                unselected_hover_color=C["card_hi"], text_color=C["text"])
+            self.tab_seg.set("Emotes")
+            self.tab_seg.grid(row=0, column=2, rowspan=2, padx=(0, 18))
             right = ctk.CTkFrame(top, fg_color="transparent")
-            right.grid(row=0, column=2, rowspan=2, sticky="e")
+            right.grid(row=0, column=3, rowspan=2, sticky="e")
             self.update_btn = self.button(right, "Check for updates", self.on_update_btn, "ghost",
                                           corner_radius=18, height=34)
             self.update_btn.pack(side="left", padx=(0, 8))
@@ -1042,6 +1315,7 @@ def run_gui():
 
             # ---- input bar
             bar = ctk.CTkFrame(r, fg_color="transparent")
+            self.bar = bar
             bar.grid(row=1, column=0, sticky="ew", padx=22, pady=(0, 14))
             bar.grid_columnconfigure(0, weight=1)
             self.url_entry = ctk.CTkEntry(
@@ -1196,6 +1470,8 @@ def run_gui():
             self.fit_seg.set(inv_f.get(self.cfg["fit"], "Fill"))
             self._show_sidebar(False)
             self._sync_save_to()
+            self._build_converter(r)
+            self._build_drop_overlay(r)
             self._set_buttons()
             self.refresh_preview()
 
@@ -1296,7 +1572,7 @@ def run_gui():
 
         # ================= options =================
         def on_auto(self):
-            self.auto = True
+            self.auto = not self.auto  # press again to turn Auto off and keep the current numbers
             self.on_option()
 
         def _sync_grid(self):
@@ -1322,7 +1598,7 @@ def run_gui():
                 elif self.auto:
                     msg = f"This {w}×{h} emote is {w / h:.1f}× wider than tall, so Auto cuts it into {n} pieces."
                 else:
-                    msg = f"Cut into {n} pieces: {c} wide × {r} tall. Press Auto to go back."
+                    msg = f"Cut into {n} pieces: {c} wide × {r} tall. Press Auto to let the app choose."
             self.mode_help.configure(text=msg)
             fit = FITS.get(self.fit_seg.get(), "auto")
             txt = FIT_HELP[fit]
@@ -1363,8 +1639,8 @@ def run_gui():
             self.work(job, done, "Looking it up on 7TV…")
 
         def on_open_file(self):
-            p = filedialog.askopenfilename(title="Pick an image", filetypes=[
-                ("Images", "*.gif *.png *.webp *.jpg *.jpeg *.avif"), ("All files", "*.*")])
+            p = filedialog.askopenfilename(title="Pick an image, GIF or video", filetypes=[
+                ("Images and videos", " ".join("*" + e for e in sorted(MEDIA_EXT))), ("All files", "*.*")])
             if p:
                 self.url_entry.delete(0, "end")
                 self.url_entry.insert(0, p)
@@ -1421,12 +1697,15 @@ def run_gui():
         def ensure_loaded(self, it):
             if it["frames"] is None:
                 if it["path"]:
-                    raw = Path(it["path"]).read_bytes()
-                    ext = Path(it["path"]).suffix.lstrip(".").lower() or "img"
+                    pth = Path(it["path"])
+                    raw = pth.read_bytes()
+                    ext = pth.suffix.lstrip(".").lower() or "img"
+                    it["raw"] = (raw, ext)
+                    it["frames"] = load_any(pth)
                 else:
                     raw, ext = download_emote(it["ref"])
-                it["raw"] = (raw, ext)
-                it["frames"] = load_frames(raw)
+                    it["raw"] = (raw, ext)
+                    it["frames"] = load_frames(raw)
             return it
 
         def select_item(self, idx):
@@ -1438,8 +1717,14 @@ def run_gui():
                 return
             self.current = None
             self._set_buttons()
-            if not self.work(lambda: self.ensure_loaded(it), self._show,
-                             f"{'Downloading' if it['ref'] else 'Opening'} {it['name']}…"):
+
+            def load():
+                try:
+                    return self.ensure_loaded(it)
+                except NeedFFmpeg:
+                    self.ui(lambda: self.ask_ffmpeg(lambda: self.select_item(idx)))
+                    raise
+            if not self.work(load, self._show, f"{'Downloading' if it['ref'] else 'Opening'} {it['name']}…"):
                 self.say("Busy, try again in a second.", "warn")
 
         def _show(self, it):
@@ -1662,51 +1947,800 @@ def run_gui():
                 self.text_dialog("What's new", head, sub, format_changelog(entries), [("Got it", "accent", None)])
             threading.Thread(target=lambda: self.ui(lambda e=job(): done(e)), daemon=True).start()
 
-        def open_settings(self):
-            top = self.dialog("Settings", 540, 610)
-            f = ctk.CTkFrame(top, fg_color="transparent")
-            f.grid(row=0, column=0, sticky="nsew", padx=24, pady=20)
-            f.grid_columnconfigure(0, weight=1)
-            self.label(f, "Settings", 18, bold=True, anchor="w").grid(row=0, column=0, sticky="ew", pady=(0, 14))
+        def open_settings(self, page="General"):
+            if getattr(self, "settings_win", None) is not None and self.settings_win.winfo_exists():
+                self.settings_win.lift()
+                return
+            top = self.dialog("Settings", 780, 560)
+            self.settings_win = top
+            top.grid_columnconfigure(1, weight=1)
+            top.grid_rowconfigure(0, weight=1)
+            nav = ctk.CTkFrame(top, fg_color=C["card"], corner_radius=0, width=200)
+            nav.grid(row=0, column=0, rowspan=2, sticky="nsew")
+            top.grid_columnconfigure(0, weight=0, minsize=200)
+            nav.grid_propagate(False)
+            hd = ctk.CTkFrame(nav, fg_color="transparent")
+            hd.pack(fill="x", padx=16, pady=(20, 18))
+            if getattr(self, "_logo", None) is not None:
+                ctk.CTkLabel(hd, text="", image=ctk.CTkImage(self._logo._light_image, self._logo._light_image,
+                                                             size=(28, 28))).pack(side="left", padx=(0, 10))
+            tx = ctk.CTkFrame(hd, fg_color="transparent")
+            tx.pack(side="left")
+            self.label(tx, "Settings", 15, bold=True, anchor="w").pack(anchor="w")
+            self.label(tx, f"v{__version__} · {KIND_LABEL[install_kind()]}", 11, "faint", anchor="w").pack(anchor="w")
+            body = ctk.CTkFrame(top, fg_color="transparent")
+            body.grid(row=0, column=1, sticky="nsew", padx=28, pady=(22, 0))
+            body.grid_columnconfigure(0, weight=1)
+            foot = ctk.CTkFrame(top, fg_color="transparent")
+            foot.grid(row=1, column=1, sticky="ew", padx=28, pady=18)
+            ok_lbl = ctk.CTkLabel(foot, text="  Changes are saved automatically", font=self.F(12),
+                                  text_color=C["faint"], image=self.ico("check", C["faint"], 13), compound="left")
+            ok_lbl.pack(side="left")
+            self.button(foot, "Done", top.destroy, "accent", width=110).pack(side="right")
+            navs = {}
 
-            self.section(f, "Piece size").grid(row=3, column=0, sticky="ew", pady=(0, 6))
-            size_seg = self.segmented(f, ["128 px", "96 px", "64 px"], None)
-            size_seg.set(f"{self.cfg['tile']} px" if self.cfg["tile"] in (128, 96, 64) else "128 px")
-            size_seg.grid(row=4, column=0, sticky="w")
-            self.label(f, "128 px is Discord's emoji size.", 11, "faint", anchor="w").grid(row=5, column=0, sticky="ew", pady=(4, 0))
-
-            def switch(row, text, key):
-                var = tk.BooleanVar(value=bool(self.cfg.get(key)))
-                ctk.CTkSwitch(f, text=text, variable=var, onvalue=True, offvalue=False, font=self.F(13),
-                              progress_color=C["accent"], button_color=C["text"], button_hover_color="white",
-                              fg_color=C["card_hi"], text_color=C["text"]).grid(row=row, column=0, sticky="w", pady=(12, 0))
-                return var
-            self.section(f, "Options").grid(row=6, column=0, sticky="ew", pady=(18, 0))
-            keep_v = switch(7, "Also keep the original file", "keep_original")
-            clip_v = switch(8, "Notice when I copy a 7TV link", "watch_clipboard")
-            tray_v = switch(9, "Keep running in the tray when I close the window", "close_to_tray")
-            chk_v = switch(10, "Check for updates when the app starts", "check_updates")
-            auto_v = switch(11, "Install updates automatically", "auto_install")
-
-            info = ctk.CTkFrame(f, fg_color=C["card"], corner_radius=12)
-            info.grid(row=12, column=0, sticky="ew", pady=(20, 0))
-            self.label(info, f"Version {__version__} · {KIND_LABEL[install_kind()]}", 12, "muted").pack(side="left", padx=14, pady=10)
-            self.button(info, "GitHub page", lambda: __import__("webbrowser").open(f"https://github.com/{GITHUB_REPO}"),
-                        "flat", width=100, height=30).pack(side="right", padx=8)
-
-            def save_close():
-                self.cfg.update(tile=int(size_seg.get().split()[0]),
-                                keep_original=bool(keep_v.get()), check_updates=bool(chk_v.get()),
-                                auto_install=bool(auto_v.get()), watch_clipboard=bool(clip_v.get()),
-                                close_to_tray=bool(tray_v.get()))
+            def save():
                 save_config(self.cfg)
-                top.destroy()
-                self.refresh_preview()
-            row = ctk.CTkFrame(top, fg_color="transparent")
-            row.grid(row=1, column=0, sticky="e", padx=24, pady=(0, 18))
-            self.button(row, "Cancel", top.destroy, "ghost", width=100).pack(side="left", padx=(0, 8))
-            self.button(row, "Save", save_close, "accent", width=100).pack(side="left")
 
+            def head(title, sub):
+                self.label(body, title, 20, bold=True, anchor="w").grid(row=0, column=0, sticky="ew")
+                self.label(body, sub, 12, "muted", anchor="w").grid(row=1, column=0, sticky="ew", pady=(2, 16))
+
+            def group(row, title=None):
+                if title:
+                    self.section(body, title).grid(row=row, column=0, sticky="ew", pady=(4, 6))
+                    row += 1
+                g = ctk.CTkFrame(body, fg_color=C["card"], corner_radius=14, border_width=1, border_color=C["border"])
+                g.grid(row=row, column=0, sticky="ew", pady=(0, 14))
+                g.grid_columnconfigure(0, weight=1)
+                g._rows = 0
+                return g, row + 1
+
+            def line(g, title, desc, control_factory):
+                if g._rows:
+                    ctk.CTkFrame(g, fg_color=C["border"], height=1, corner_radius=0).grid(
+                        row=g._rows * 2 - 1, column=0, columnspan=2, sticky="ew", padx=16)
+                r_ = g._rows * 2
+                txt = ctk.CTkFrame(g, fg_color="transparent")
+                txt.grid(row=r_, column=0, sticky="ew", padx=(16, 12), pady=12)
+                self.label(txt, title, 13, anchor="w").pack(anchor="w")
+                if desc:
+                    self.label(txt, desc, 11, "muted", anchor="w", justify="left", wraplength=360).pack(anchor="w", pady=(1, 0))
+                ctl = control_factory(g)
+                ctl.grid(row=r_, column=1, sticky="e", padx=16)
+                g._rows += 1
+                return ctl
+
+            def switch(key, on_change=None, value=None):
+                def make(g):
+                    var = tk.BooleanVar(value=bool(self.cfg.get(key)) if value is None else value)
+
+                    def changed():
+                        if on_change:
+                            on_change(bool(var.get()))
+                        else:
+                            self.cfg[key] = bool(var.get())
+                            save()
+                    return ctk.CTkSwitch(g, text="", variable=var, onvalue=True, offvalue=False, width=46,
+                                         command=changed, progress_color=C["accent"], button_color="#ffffff",
+                                         button_hover_color="#ffffff", fg_color=C["card_hi"])
+                return make
+
+            def clear():
+                for w in body.winfo_children():
+                    w.destroy()
+
+            def page_general():
+                clear()
+                head("General", "How the app behaves on your PC.")
+                g, row = group(2, "Window and tray")
+                line(g, "Keep running in the tray", "Closing the window hides it to the tray instead of quitting.",
+                     switch("close_to_tray"))
+                if sys.platform.startswith("win"):
+                    line(g, "Start with Windows", "Starts quietly in the tray when you sign in.",
+                         switch("autostart", lambda on: (set_autostart(on), self.cfg.update(autostart=on), save()),
+                                value=autostart_enabled()))
+                g, row = group(row, "7TV")
+                line(g, "Notice copied 7TV links", "When you copy an emote link on 7tv.app, offer to save it.",
+                     switch("watch_clipboard"))
+
+            def page_saving():
+                clear()
+                head("Saving", "Where emotes go and how they're made.")
+                g, row = group(2, "Location")
+
+                def loc(gg):
+                    f = ctk.CTkFrame(gg, fg_color="transparent")
+                    m = ctk.CTkOptionMenu(f, values=list(SAVE_PRESETS.values()), width=170, height=32, corner_radius=8,
+                                          font=self.F(12), dropdown_font=self.F(12), fg_color=C["field"],
+                                          button_color=C["card_hi"], button_hover_color=C["border"], text_color=C["text"],
+                                          dropdown_fg_color=C["card_hi"], dropdown_hover_color=C["border"],
+                                          dropdown_text_color=C["text"],
+                                          command=lambda v: (self.on_save_preset(v), path.configure(text=str(self.out_dir()))))
+                    m.set(SAVE_PRESETS.get(self.cfg.get("save_preset", "app"), "App folder"))
+                    m.pack(side="left")
+                    return f
+                line(g, "Save emotes to", "Converted files go into a “Converted” folder inside it.", loc)
+                pr = ctk.CTkFrame(g, fg_color=C["field"], corner_radius=10)
+                pr.grid(row=g._rows * 2, column=0, columnspan=2, sticky="ew", padx=16, pady=(0, 14))
+                pr.grid_columnconfigure(0, weight=1)
+                path = ctk.CTkLabel(pr, text=str(self.out_dir()), font=self.F(11), text_color=C["muted"], anchor="w")
+                path.grid(row=0, column=0, sticky="ew", padx=12, pady=8)
+                self.button(pr, "Open", lambda: self.on_open_out(True), "flat", width=70, height=28,
+                            image=self.ico("folder", C["muted"], 13), compound="left").grid(row=0, column=1, padx=6)
+                g._rows += 1
+                g, row = group(row, "Emotes")
+
+                def size(gg):
+                    sg = self.segmented(gg, ["128 px", "96 px", "64 px"], lambda v: (self.cfg.update(tile=int(v.split()[0])),
+                                                                                    save(), self.refresh_preview()))
+                    sg.set(f"{self.cfg['tile']} px" if self.cfg["tile"] in (128, 96, 64) else "128 px")
+                    return sg
+                line(g, "Piece size", "128 px is Discord's emoji size. Big video emotes may be shrunk to fit 256 KB.", size)
+                line(g, "Also keep the original file", "Saves the file from 7TV next to the pieces.", switch("keep_original"))
+
+            def page_updates():
+                clear()
+                head("Updates", "New versions come straight from GitHub.")
+                g, row = group(2)
+                line(g, "Check for updates when the app starts", None, switch("check_updates"))
+                line(g, "Install updates automatically", "Updates install and the app restarts when it's idle.",
+                     switch("auto_install"))
+                g, row = group(row)
+                st_txt = {"uptodate": "You're up to date", "available": "An update is ready",
+                          "checking": "Checking…", "error": "Couldn't check", "downloading": "Downloading…"}
+
+                def now(gg):
+                    f = ctk.CTkFrame(gg, fg_color="transparent")
+                    self.button(f, "What's new", self.show_changelog, "flat", width=100, height=32).pack(side="left", padx=(0, 6))
+                    self.button(f, "Check now", lambda: (self.check_updates(True), top.after(1500, page_updates)), "ghost",
+                                width=110, height=32, image=self.ico("refresh", C["text"], 13), compound="left").pack(side="left")
+                    return f
+                line(g, f"Version {__version__}", st_txt.get(self.upd_state, "Not checked yet"), now)
+
+            def page_about():
+                clear()
+                head("About", "Emotes Downloader, made by ISdook.")
+                g, row = group(2)
+                line(g, "Emotes Downloader", f"Version {__version__} · {KIND_LABEL[install_kind()]} · 7TV emotes to Discord",
+                     lambda gg: self.button(gg, "GitHub", lambda: __import__("webbrowser").open(f"https://github.com/{GITHUB_REPO}"),
+                                            "ghost", width=100, height=32, image=self.ico("external", C["text"], 13), compound="left"))
+                line(g, "Settings file", str(CONFIG_PATH),
+                     lambda gg: self.button(gg, "Show", lambda: open_folder(CONFIG_PATH.parent), "flat", width=80, height=32))
+
+                def reset(gg):
+                    def do():
+                        keep = {k: self.cfg.get(k) for k in ("last_version", "told_tray")}
+                        self.cfg.clear()
+                        self.cfg.update(DEFAULTS)
+                        self.cfg.update({k: v for k, v in keep.items() if v is not None})
+                        save()
+                        self._sync_save_to()
+                        self.refresh_preview()
+                        self.say("Settings were reset.", "ok")
+                        page_about()
+                    return self.button(gg, "Reset", do, "ghost", width=90, height=32, text_color=C["bad"])
+                line(g, "Reset all settings", "Puts every option back to how it was on first start.", reset)
+
+            pages = {"General": ("gear", page_general), "Saving": ("folder", page_saving),
+                     "Updates": ("refresh", page_updates), "About": ("external", page_about)}
+
+            def go(name):
+                for n_, b_ in navs.items():
+                    on = n_ == name
+                    b_.configure(fg_color=C["card_hi"] if on else "transparent",
+                                 text_color=C["text"] if on else C["muted"],
+                                 image=self.ico(pages[n_][0], C["accent"] if on else C["muted"], 15))
+                pages[name][1]()
+            for name, (icon, _) in pages.items():
+                b_ = ctk.CTkButton(nav, text="  " + name, anchor="w", height=38, corner_radius=10,
+                                   fg_color="transparent", hover_color=C["card_hi"], text_color=C["muted"],
+                                   font=self.F(13), image=self.ico(icon, C["muted"], 15), compound="left",
+                                   command=lambda n_=name: go(n_))
+                b_.pack(fill="x", padx=10, pady=2)
+                navs[name] = b_
+            go(page if page in pages else "General")
+
+
+        # ================= tabs =================
+        def switch_tab(self, name):
+            self.tab = name
+            self.tab_seg.set(name)
+            if name == "Converter":
+                for w in (self.bar, self.banner, self.body):
+                    w.grid_remove()
+                self.conv.grid(row=1, column=0, rowspan=3, sticky="nsew", padx=22)
+                self.say("Converter: drop any images, GIFs or videos, pick a size and format, then Convert.", "info")
+            else:
+                self.conv.grid_remove()
+                self.bar.grid()
+                self.body.grid()
+                if getattr(self, "clip_ref", None) is not None and self.banner.winfo_manager() == "" and \
+                        getattr(self, "_banner_visible", False):
+                    self.banner.grid()
+
+        # ================= drag & drop =================
+        def _build_drop_overlay(self, r):
+            ov = ctk.CTkFrame(r, fg_color=C["bg"], corner_radius=0)
+            box = ctk.CTkFrame(ov, fg_color=C["card"], corner_radius=20, border_width=2, border_color=C["accent"])
+            box.place(relx=0.5, rely=0.5, relwidth=0.86, relheight=0.78, anchor="center")
+            inner = ctk.CTkFrame(box, fg_color="transparent")
+            inner.place(relx=0.5, rely=0.5, anchor="center")
+            ctk.CTkLabel(inner, text="", image=self.ico("download", C["accent"], 54)).pack(pady=(0, 14))
+            self.drop_title = self.label(inner, "Drop to load", 22, bold=True)
+            self.drop_title.pack()
+            self.drop_sub = self.label(inner, "", 13, "muted")
+            self.drop_sub.pack(pady=(6, 0))
+            self.drop_overlay = ov
+            dnd = getattr(self.root, "_dnd", None)
+            if not dnd:
+                return
+            try:
+                self.root.drop_target_register(*dnd)
+                self.root.dnd_bind("<<DropEnter>>", self._drop_enter)
+                self.root.dnd_bind("<<DropLeave>>", self._drop_leave)
+                self.root.dnd_bind("<<Drop>>", self.on_drop)
+            except Exception as e:  # noqa
+                self.log_lines.append(f"Drag and drop not available: {e!r}")
+
+        def _drop_enter(self, e):
+            if self.tab == "Converter":
+                self.drop_title.configure(text="Drop to add to the Converter")
+                self.drop_sub.configure(text="Images, GIFs, WebP, AVIF, videos (MP4, WebM, MOV…) or whole folders")
+            else:
+                self.drop_title.configure(text="Drop to load")
+                self.drop_sub.configure(text="Images, GIFs, videos or a folder of them, or a 7TV link")
+            self.drop_overlay.place(x=0, y=0, relwidth=1, relheight=1)
+            self.drop_overlay.lift()
+            return getattr(e, "action", "copy")
+
+        def _drop_leave(self, e=None):
+            self.drop_overlay.place_forget()
+            return getattr(e, "action", "copy")
+
+        def on_drop(self, e):
+            self._drop_leave()
+            data = getattr(e, "data", "") or ""
+            try:
+                parts = list(self.root.tk.splitlist(data))
+            except Exception:
+                parts = [data]
+            paths = [p for p in parts if p and os.path.exists(p)]
+            if not paths:
+                text = data.strip().strip("{}")
+                try:
+                    kind, val = parse_input(text)
+                except ValueError:
+                    kind = None
+                if kind in ("emote", "set", "user"):
+                    self.switch_tab("Emotes")
+                    self.url_entry.delete(0, "end")
+                    self.url_entry.insert(0, text)
+                    self.on_load()
+                else:
+                    self.say("That can't be used. Drop images, GIFs, videos, a folder or a 7TV link.", "warn")
+                return getattr(e, "action", "copy")
+            if self.tab == "Converter":
+                self.conv_add(paths)
+            else:
+                self.load_paths(paths)
+            return getattr(e, "action", "copy")
+
+        def load_paths(self, paths):
+            files = collect_media(paths, videos=True)
+            if not files:
+                self.say("No images, GIFs or videos found in what you dropped.", "warn")
+                return
+            items = [dict(name=f.stem, ref=None, path=str(f), frames=None, raw=None) for f in files]
+            if len(items) == 1:
+                self.url_entry.delete(0, "end")
+                self.url_entry.insert(0, str(files[0]))
+                self.set_items(None, items)
+            else:
+                dirs = [Path(p) for p in paths if Path(p).is_dir()]
+                title = dirs[0].name if len(dirs) == 1 and len(paths) == 1 else "Dropped files"
+                self.set_items(title, items)
+                self.say(f"Loaded {len(items)} files. Pick one to preview, or Save all.", "ok")
+
+        def ask_ffmpeg(self, then=None):
+            if getattr(self, "_ffmpeg_busy", False):
+                return
+
+            def go():
+                self._ffmpeg_busy = True
+
+                def prog(p):
+                    self.ui(lambda: self.say(f"Downloading video support… {int(p * 100)}%", "busy"))
+
+                def job():
+                    try:
+                        install_ffmpeg(prog)
+                        err = None
+                    except Exception as e:  # noqa
+                        err = e
+
+                    def done():
+                        self._ffmpeg_busy = False
+                        if err:
+                            self.say(f"Couldn't download video support: {err}", "err")
+                            return
+                        self.say("Video support is ready.", "ok")
+                        self.toast("Video support installed", "You can now open and convert video files.", "ok")
+                        if then:
+                            then()
+                    self.ui(done)
+                threading.Thread(target=job, daemon=True).start()
+            self.text_dialog("Video support", "Turn on video support?",
+                             "Needed once to open MP4, WebM, MOV and other videos.",
+                             "To read video files the app uses ffmpeg, a free and widely used video tool.\n\n"
+                             "It's a one-time download of about 40 MB from PyPI (the official Python package site), "
+                             f"saved to:\n{data_dir()}\n\nImages and GIFs work without it.",
+                             [("Not now", "ghost", None), ("Download", "accent", go)])
+
+        # ================= Converter tab =================
+        def _build_converter(self, r):
+            cf = ctk.CTkFrame(r, fg_color="transparent")
+            self.conv = cf
+            cf.grid_columnconfigure(1, weight=1)
+            cf.grid_rowconfigure(0, weight=1)
+            self.conv_items, self.conv_sel, self.conv_gen = [], None, 0
+            self.conv_job, self.conv_anim, self.conv_imgs, self.conv_view = None, None, [], "After"
+
+            # ---- files (left)
+            left = self.card(cf, width=300)
+            left.grid(row=0, column=0, sticky="ns", padx=(0, 14))
+            left.grid_propagate(False)
+            left.grid_rowconfigure(1, weight=1)
+            left.grid_columnconfigure(0, weight=1)
+            hd = ctk.CTkFrame(left, fg_color="transparent")
+            hd.grid(row=0, column=0, sticky="ew", padx=16, pady=(16, 8))
+            self.section(hd, "Files").pack(side="left")
+            self.conv_count = self.label(hd, "", 12, "faint")
+            self.conv_count.pack(side="right")
+            lw = ctk.CTkFrame(left, fg_color=C["field"], corner_radius=12)
+            lw.grid(row=1, column=0, sticky="nsew", padx=12)
+            lw.grid_rowconfigure(0, weight=1)
+            lw.grid_columnconfigure(0, weight=1)
+            self.conv_list = tk.Listbox(lw, bg=C["field"], fg=C["text"], selectbackground=C["accent"],
+                                        selectforeground="white", highlightthickness=0, bd=0, activestyle="none",
+                                        font=(FAMILY, 10), exportselection=False, selectmode="extended")
+            self.conv_list.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
+            self.conv_list.bind("<<ListboxSelect>>", lambda _e: self._conv_select())
+            sb = ctk.CTkScrollbar(lw, command=self.conv_list.yview, button_color=C["card_hi"],
+                                  button_hover_color=C["border"])
+            sb.grid(row=0, column=1, sticky="ns", pady=6)
+            self.conv_list.configure(yscrollcommand=sb.set)
+            self.conv_empty = ctk.CTkFrame(lw, fg_color="transparent")
+            self.conv_empty.place(relx=0.5, rely=0.45, anchor="center")
+            ctk.CTkLabel(self.conv_empty, text="", image=self.ico("download", C["faint"], 34)).pack(pady=(0, 10))
+            self.label(self.conv_empty, "Drop files here", 14, bold=True).pack()
+            self.label(self.conv_empty, "images, GIFs, videos or a folder", 12, "muted").pack(pady=(2, 0))
+            br = ctk.CTkFrame(left, fg_color="transparent")
+            br.grid(row=2, column=0, sticky="ew", padx=12, pady=12)
+            br.grid_columnconfigure((0, 1), weight=1)
+            self.button(br, "Add files", self.conv_pick_files, "ghost", height=34).grid(row=0, column=0, sticky="ew", padx=(0, 4))
+            self.button(br, "Add folder", self.conv_pick_folder, "ghost", height=34,
+                        image=self.ico("folder", C["text"], 14), compound="left").grid(row=0, column=1, sticky="ew", padx=(4, 0))
+            self.button(br, "Remove", self.conv_remove, "flat", height=30).grid(row=1, column=0, sticky="ew", padx=(0, 4), pady=(6, 0))
+            self.button(br, "Clear all", self.conv_clear, "flat", height=30).grid(row=1, column=1, sticky="ew", padx=(4, 0), pady=(6, 0))
+
+            # ---- preview (middle)
+            mid = self.card(cf)
+            mid.grid(row=0, column=1, sticky="nsew")
+            mid.grid_columnconfigure(0, weight=1)
+            mid.grid_rowconfigure(1, weight=1)
+            mh = ctk.CTkFrame(mid, fg_color="transparent")
+            mh.grid(row=0, column=0, sticky="ew", padx=18, pady=(16, 8))
+            self.section(mh, "Preview").pack(side="left")
+            self.conv_view_seg = self.segmented(mh, ["Before", "After"], self._conv_view)
+            self.conv_view_seg.configure(height=28, font=self.F(12))
+            self.conv_view_seg.set("After")
+            self.conv_view_seg.pack(side="right")
+            cw = ctk.CTkFrame(mid, fg_color=C["discord"], corner_radius=12)
+            cw.grid(row=1, column=0, sticky="nsew", padx=18)
+            cw.grid_columnconfigure(0, weight=1)
+            cw.grid_rowconfigure(0, weight=1)
+            self.conv_canvas = tk.Canvas(cw, bg=C["discord"], highlightthickness=0, bd=0)
+            self.conv_canvas.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
+            self.conv_canvas.bind("<Configure>", lambda _e: self._conv_draw())
+            info = ctk.CTkFrame(mid, fg_color="transparent")
+            info.grid(row=2, column=0, sticky="ew", padx=18, pady=14)
+            info.grid_columnconfigure((0, 1), weight=1)
+            b1 = ctk.CTkFrame(info, fg_color=C["field"], corner_radius=10)
+            b1.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+            self.label(b1, "BEFORE", 10, "faint", bold=True).pack(anchor="w", padx=12, pady=(8, 0))
+            self.conv_before = self.label(b1, "-", 12, anchor="w", justify="left", wraplength=250)
+            self.conv_before.pack(anchor="w", padx=12, pady=(0, 8))
+            b2 = ctk.CTkFrame(info, fg_color=C["field"], corner_radius=10)
+            b2.grid(row=0, column=1, sticky="ew", padx=(6, 0))
+            self.label(b2, "AFTER", 10, "faint", bold=True).pack(anchor="w", padx=12, pady=(8, 0))
+            self.conv_after = self.label(b2, "-", 12, anchor="w", justify="left", wraplength=250)
+            self.conv_after.pack(anchor="w", padx=12, pady=(0, 8))
+
+            # ---- options (right)
+            opt = self.card(cf, width=330)
+            opt.grid(row=0, column=2, sticky="ns", padx=(14, 0))
+            opt.grid_propagate(False)
+            opt.grid_columnconfigure(0, weight=1)
+            pad = dict(padx=18, sticky="ew")
+            cfg = self.cfg.setdefault("conv", {})
+            self.section(opt, "Make it a").grid(row=0, column=0, pady=(16, 8), **pad)
+            self.cv_preset = self.segmented(opt, list(PRESETS), lambda v: self._conv_preset(v))
+            self.cv_preset.grid(row=1, column=0, **pad)
+            sz = ctk.CTkFrame(opt, fg_color="transparent")
+            sz.grid(row=2, column=0, pady=(10, 0), **pad)
+
+            def num_entry(parent, val, width=62):
+                v = tk.StringVar(value=str(val))
+                e = ctk.CTkEntry(parent, textvariable=v, width=width, height=32, corner_radius=8, border_width=1,
+                                 border_color=C["border"], fg_color=C["field"], text_color=C["text"], font=self.F(13),
+                                 justify="center")
+                v.trace_add("write", lambda *_: self._conv_changed(custom=True))
+                return v, e
+            self.label(sz, "Size", 12, "muted").pack(side="left", padx=(0, 8))
+            self.cv_w, ew = num_entry(sz, cfg.get("w", 128))
+            ew.pack(side="left")
+            self.label(sz, "×", 13, "muted").pack(side="left", padx=6)
+            self.cv_h, eh = num_entry(sz, cfg.get("h", 128))
+            eh.pack(side="left")
+            self.label(sz, "px", 12, "muted").pack(side="left", padx=(6, 0))
+            lm = ctk.CTkFrame(opt, fg_color="transparent")
+            lm.grid(row=3, column=0, pady=(8, 0), **pad)
+            self.label(lm, "Max file size", 12, "muted").pack(side="left", padx=(0, 8))
+            self.cv_limit = ctk.CTkOptionMenu(
+                lm, values=["256 KB", "512 KB", "1 MB", "2 MB", "8 MB", "No limit"], width=120, height=30,
+                command=lambda _v: self._conv_changed(custom=True), corner_radius=8, font=self.F(12),
+                dropdown_font=self.F(12), fg_color=C["field"], button_color=C["card_hi"], button_hover_color=C["border"],
+                text_color=C["text"], dropdown_fg_color=C["card_hi"], dropdown_hover_color=C["border"],
+                dropdown_text_color=C["text"])
+            self.cv_limit.set(cfg.get("limit", "256 KB"))
+            self.cv_limit.pack(side="left")
+            self.cv_preset_help = self.label(opt, "", 11, "faint", anchor="w", justify="left", wraplength=290)
+            self.cv_preset_help.grid(row=4, column=0, pady=(6, 0), **pad)
+
+            def seg_row(row, title, values, key, default):
+                self.section(opt, title).grid(row=row, column=0, pady=(14, 6), **pad)
+                sg = self.segmented(opt, values, lambda _v: self._conv_changed())
+                sg.set(cfg.get(key, default))
+                sg.grid(row=row + 1, column=0, **pad)
+                return sg
+            self.cv_fmt = seg_row(5, "Format", ["Auto", "GIF", "PNG", "WebP"], "fmt", "Auto")
+            self.cv_fit = seg_row(7, "Fit", list(FITS), "fit", "Fill")
+            self.cv_scale = seg_row(9, "Scaling", ["Smooth", "Pixel art"], "scale", "Smooth")
+            self.cv_fps = seg_row(11, "Frame rate", ["Keep", "30", "20", "15", "10"], "fps", "Keep")
+            self.section(opt, "Colours").grid(row=13, column=0, pady=(14, 6), **pad)
+            cr = ctk.CTkFrame(opt, fg_color="transparent")
+            cr.grid(row=14, column=0, **pad)
+            cr.grid_columnconfigure(0, weight=1)
+            self.cv_colors = ctk.CTkSlider(cr, from_=8, to=256, number_of_steps=31, height=16,
+                                           progress_color=C["accent"], button_color="#ffffff",
+                                           button_hover_color="#ffffff", fg_color=C["card_hi"],
+                                           command=lambda v: (self.cv_colors_lbl.configure(text=str(int(v))),
+                                                              self._conv_changed()))
+            self.cv_colors.set(cfg.get("colors", 256))
+            self.cv_colors.grid(row=0, column=0, sticky="ew")
+            self.cv_colors_lbl = self.label(cr, str(int(self.cv_colors.get())), 12, bold=True, width=36)
+            self.cv_colors_lbl.grid(row=0, column=1, padx=(8, 0))
+            self.conv_btn = self.button(opt, "Convert", self.conv_run, "accent", height=46, corner_radius=12,
+                                        font=self.F(15, True), image=self.ico("download", "#ffffff", 18), compound="left")
+            self.conv_btn.grid(row=15, column=0, pady=(20, 0), **pad)
+            self.conv_dest = ctk.CTkLabel(opt, text="", font=self.F(11), text_color=C["faint"], anchor="w",
+                                          justify="left", wraplength=290, cursor="hand2")
+            self.conv_dest.grid(row=16, column=0, pady=(6, 0), **pad)
+            self.conv_dest.bind("<Button-1>", lambda _e: self._conv_open_out())
+            opt.grid_rowconfigure(17, weight=1)
+            self.cv_preset.set(cfg.get("preset", "Emoji"))
+            self._conv_preset(self.cv_preset.get(), init=True)
+            self._conv_refresh_list()
+
+        def conv_out_dir(self):
+            return self.out_dir() / "Converted"
+
+        def _conv_open_out(self):
+            p = self.conv_out_dir()
+            try:
+                p.mkdir(parents=True, exist_ok=True)
+                open_folder(p)
+            except Exception as e:  # noqa
+                self.say(f"Couldn't open {p}: {e}", "err")
+
+        def _conv_preset(self, name, init=False):
+            pr = PRESETS.get(name)
+            self._conv_lock = True
+            if pr:
+                w, h, kb = pr
+                self.cv_w.set(str(w))
+                self.cv_h.set(str(h))
+                self.cv_limit.set(f"{kb} KB")
+            self._conv_lock = False
+            help_ = {"Emoji": "Discord emoji: 128×128, up to 256 KB. GIF for animated, PNG for still.",
+                     "Sticker": "Discord sticker: 320×320, up to 512 KB.",
+                     "Custom": "Any size and file size limit you want."}[name]
+            self.cv_preset_help.configure(text=help_)
+            if not init:
+                self._conv_changed()
+
+        def conv_opts(self):
+            def num(v, d):
+                try:
+                    return max(1, min(4096, int(v.get())))
+                except ValueError:
+                    return d
+            lim = self.cv_limit.get()
+            kb = None if lim == "No limit" else (int(lim.split()[0]) * (1024 if "MB" in lim else 1))
+            fps = self.cv_fps.get()
+            return dict(width=num(self.cv_w, 128), height=num(self.cv_h, 128),
+                        fmt={"Auto": "auto", "GIF": "gif", "PNG": "png", "WebP": "webp"}[self.cv_fmt.get()],
+                        fit=FITS.get(self.cv_fit.get(), "auto"), pixel=self.cv_scale.get() == "Pixel art",
+                        colors=int(self.cv_colors.get()), fps=None if fps == "Keep" else int(fps), limit_kb=kb)
+
+        def _conv_changed(self, custom=False):
+            if getattr(self, "_conv_lock", False) or not hasattr(self, "cv_colors_lbl"):
+                return
+            if custom and self.cv_preset.get() != "Custom":
+                pr = PRESETS[self.cv_preset.get()]
+                o = self.conv_opts()
+                if (o["width"], o["height"], o["limit_kb"]) != pr:
+                    self.cv_preset.set("Custom")
+                    self.cv_preset_help.configure(text="Any size and file size limit you want.")
+            self.cfg["conv"] = dict(preset=self.cv_preset.get(), w=self.cv_w.get(), h=self.cv_h.get(),
+                                    limit=self.cv_limit.get(), fmt=self.cv_fmt.get(), fit=self.cv_fit.get(),
+                                    scale=self.cv_scale.get(), fps=self.cv_fps.get(), colors=int(self.cv_colors.get()))
+            save_config(self.cfg)
+            for it in self.conv_items:
+                it["result"] = None
+                if it.get("status") in ("done", "over"):
+                    it["status"] = "ready"
+            self._conv_refresh_list(keep_sel=True)
+            if self.conv_job:
+                self.root.after_cancel(self.conv_job)
+            self.conv_job = self.root.after(350, self._conv_preview)
+
+        def conv_pick_files(self):
+            ps = filedialog.askopenfilenames(title="Add images, GIFs or videos", filetypes=[
+                ("Images and videos", " ".join("*" + e for e in sorted(MEDIA_EXT))), ("All files", "*.*")])
+            if ps:
+                self.conv_add(list(ps))
+
+        def conv_pick_folder(self):
+            d = filedialog.askdirectory(title="Add every image, GIF and video in a folder")
+            if d:
+                self.conv_add([d])
+
+        def conv_add(self, paths):
+            files = collect_media(paths, videos=True)
+            have = {it["path"] for it in self.conv_items}
+            new = [f for f in files if str(f) not in have]
+            if not new:
+                self.say("No new images, GIFs or videos found." if not files else "Those files are already in the list.", "warn")
+                return
+            for f in new:
+                self.conv_items.append(dict(path=str(f), name=f.name, frames=None, result=None, status="ready",
+                                            src_kb=max(1, f.stat().st_size // 1024)))
+            self.switch_tab("Converter")
+            self._conv_refresh_list()
+            if self.conv_sel is None:
+                self.conv_list.selection_set(len(self.conv_items) - len(new))
+                self._conv_select()
+            self.say(f"Added {len(new)} file{'s' if len(new) > 1 else ''} to the Converter.", "ok")
+
+        def conv_remove(self):
+            sel = sorted(self.conv_list.curselection(), reverse=True)
+            for i in sel:
+                del self.conv_items[i]
+            self.conv_sel = None
+            self._conv_refresh_list()
+            self._conv_draw()
+
+        def conv_clear(self):
+            self.conv_items = []
+            self.conv_sel = None
+            self._conv_refresh_list()
+            self._conv_draw()
+
+        def _conv_line(self, it):
+            st = it.get("status")
+            res = it.get("result")
+            tail = {"ready": "", "loading": "  ·  loading…", "working": "  ·  converting…",
+                    "error": "  ·  couldn't read"}.get(st, "")
+            if res is not None and st in ("done", "over", "ready"):
+                tail = f"  ·  {len(res['data']) // 1024} KB {res['ext'].upper()}" + ("  (over limit)" if res["over"] else "")
+                if st == "done":
+                    tail += "  ·  saved"
+            return f"  {it['name']}{tail}"
+
+        def _conv_refresh_list(self, keep_sel=False):
+            sel = self.conv_list.curselection()
+            self.conv_list.delete(0, "end")
+            for i, it in enumerate(self.conv_items):
+                self.conv_list.insert("end", self._conv_line(it))
+                col = {"done": C["good"], "over": C["warn"], "error": C["bad"]}.get(it.get("status"))
+                if col:
+                    self.conv_list.itemconfigure(i, fg=col)
+            if keep_sel:
+                for i in sel:
+                    if i < len(self.conv_items):
+                        self.conv_list.selection_set(i)
+            n = len(self.conv_items)
+            self.conv_count.configure(text=f"{n} file{'s' if n != 1 else ''}" if n else "")
+            if n:
+                self.conv_empty.place_forget()
+            else:
+                self.conv_empty.place(relx=0.5, rely=0.45, anchor="center")
+            self.conv_btn.configure(text=f" Convert {n} file{'s' if n != 1 else ''}" if n > 1 else " Convert",
+                                    state="normal" if n else "disabled")
+            self.conv_dest.configure(text=f"  {self.conv_out_dir()}", image=self.ico("folder", C["faint"], 13), compound="left")
+
+        def _conv_select(self):
+            sel = self.conv_list.curselection()
+            if not sel:
+                return
+            self.conv_sel = sel[-1]
+            self._conv_preview()
+
+        def _conv_view(self, v):
+            self.conv_view = v
+            self._conv_draw()
+
+        def _conv_preview(self):
+            self.conv_job = None
+            if self.conv_sel is None or self.conv_sel >= len(self.conv_items):
+                self._conv_draw()
+                return
+            it = self.conv_items[self.conv_sel]
+            self.conv_gen += 1
+            gen, opts = self.conv_gen, self.conv_opts()
+            self.conv_after.configure(text="converting…")
+
+            def job():
+                try:
+                    if it["frames"] is None:
+                        it["frames"] = load_any(it["path"])
+                    res = convert_media(it["frames"], **opts)
+                    err = None
+                except Exception as e:  # noqa
+                    res, err = None, e
+
+                def done():
+                    if isinstance(err, NeedFFmpeg):
+                        self.conv_after.configure(text="Video support isn't installed yet.")
+                        self.ask_ffmpeg(self._conv_preview)
+                        return
+                    if err:
+                        it["status"] = "error"
+                        self.conv_after.configure(text=f"Couldn't convert: {err}")
+                        self._conv_refresh_list(keep_sel=True)
+                        return
+                    it["result"] = res
+                    if gen == self.conv_gen:
+                        self._conv_refresh_list(keep_sel=True)
+                        self._conv_draw()
+                self.ui(done)
+            threading.Thread(target=job, daemon=True).start()
+
+        def _conv_draw(self):
+            if self.conv_anim:
+                self.root.after_cancel(self.conv_anim)
+                self.conv_anim = None
+            cv = self.conv_canvas
+            cv.delete("all")
+            cw, ch = max(80, cv.winfo_width()), max(80, cv.winfo_height())
+            it = self.conv_items[self.conv_sel] if self.conv_sel is not None and self.conv_sel < len(self.conv_items) else None
+            if it is None:
+                cv.create_text(cw // 2, ch // 2 - 12, text="Nothing selected", fill=C["text"], font=(FAMILY, 15, "bold"))
+                cv.create_text(cw // 2, ch // 2 + 16, text="Drop files on the window, or use Add files",
+                               fill=C["muted"], font=(FAMILY, 11))
+                self.conv_before.configure(text="-")
+                self.conv_after.configure(text="-")
+                return
+            if it["frames"] is not None:
+                fw, fh = it["frames"][0][0].size
+                ext = Path(it["path"]).suffix.lstrip(".").upper()
+                n = len(it["frames"])
+                self.conv_before.configure(text=f"{fw}×{fh}  ·  {ext}  ·  {n} frame{'s' if n > 1 else ''}  ·  {it['src_kb']:,} KB")
+            res = it.get("result")
+            if res is not None:
+                kb = len(res["data"]) // 1024
+                self.conv_after.configure(
+                    text=f"{res['size'][0]}×{res['size'][1]}  ·  {res['ext'].upper()}  ·  {res['frames']} frame"
+                         f"{'s' if res['frames'] > 1 else ''}  ·  {kb:,} KB" + (f"  ·  {res['note']}" if res["note"] != "full quality" else ""),
+                    text_color=C["warn"] if res["over"] else C["good"])
+            if self.conv_view == "After" and res is not None:
+                frames = load_frames(res["data"])
+                pixel = self.cv_scale.get() == "Pixel art"
+            elif it["frames"] is not None:
+                frames, pixel = it["frames"], False
+            else:
+                return
+            frames = frames[:300]
+            w, h = frames[0][0].size
+            k = min((cw - 40) / w, (ch - 40) / h)
+            if self.conv_view == "After":
+                k = max(1, int(k)) if k >= 1 else k   # whole-number zoom keeps the result honest
+            nw, nh = max(1, int(w * k)), max(1, int(h * k))
+            method = Image.Resampling.NEAREST if (pixel or (self.conv_view == "After" and k >= 2)) else LANCZOS
+            checker = Image.new("RGBA", (nw, nh), (60, 62, 70, 255))
+            d = ImageDraw.Draw(checker)
+            t = 10
+            for yy in range(0, nh, t):
+                for xx in range((yy // t) % 2 * t, nw, t * 2):
+                    d.rectangle((xx, yy, xx + t - 1, yy + t - 1), fill=(72, 74, 84, 255))
+            imgs = []
+            for f, dur in frames:
+                im = checker.copy()
+                im.alpha_composite(f.resize((nw, nh), method))
+                imgs.append((ImageTk.PhotoImage(im), dur))
+            self.conv_imgs = imgs
+            x0, y0 = (cw - nw) // 2, (ch - nh) // 2
+            img_id = cv.create_image(x0, y0, anchor="nw", image=imgs[0][0])
+            cv.create_rectangle(x0 - 1, y0 - 1, x0 + nw, y0 + nh, outline="#4a4d57")
+
+            def step(i=0):
+                cv.itemconfigure(img_id, image=imgs[i][0])
+                self.conv_anim = self.root.after(imgs[i][1], step, (i + 1) % len(imgs))
+            if len(imgs) > 1:
+                step()
+
+        def conv_run(self):
+            if not self.conv_items or getattr(self, "_conv_running", False):
+                return
+            if not ffmpeg_exe() and any(Path(it["path"]).suffix.lower() in VIDEO_EXT and it["frames"] is None
+                                        for it in self.conv_items):
+                self.ask_ffmpeg(self.conv_run)
+                return
+            opts = self.conv_opts()
+            out = self.conv_out_dir()
+            items = list(self.conv_items)
+            self._conv_running = True
+            self.conv_btn.configure(state="disabled", text=" Converting…")
+
+            def job():
+                ok = over = bad = 0
+                for k, it in enumerate(items, 1):
+                    self.ui(lambda k=k, it=it: (self.say(f"Converting {k}/{len(items)}: {it['name']}", "busy"),
+                                                it.update(status="working"), self._conv_refresh_list(keep_sel=True)))
+                    try:
+                        if it["frames"] is None:
+                            it["frames"] = load_any(it["path"])
+                        res = it.get("result") or convert_media(it["frames"], **opts)
+                        it["result"] = res
+                        out.mkdir(parents=True, exist_ok=True)
+                        base = Path(it["path"]).stem
+                        dest = out / f"{base}.{res['ext']}"
+                        n = 2
+                        while dest.exists():
+                            dest = out / f"{base} ({n}).{res['ext']}"
+                            n += 1
+                        dest.write_bytes(res["data"])
+                        it["status"] = "over" if res["over"] else "done"
+                        over += res["over"]
+                        ok += 1
+                    except Exception as e:  # noqa
+                        it["status"] = "error"
+                        bad += 1
+                        self.log_lines.append(f"  FAILED  {it['name']}: {e}")
+                return ok, over, bad
+
+            def done(r_):
+                ok, over, bad = r_
+                self._conv_running = False
+                self._conv_refresh_list(keep_sel=True)
+                self.last_out = out
+                msg = f"Converted {ok} file{'s' if ok != 1 else ''} into {out}"
+                if over:
+                    msg += f" · {over} still over the size limit"
+                if bad:
+                    msg += f" · {bad} failed (see Log)"
+                self.say(msg, "warn" if over or bad else "ok")
+                self.toast("Conversion finished", msg, "warn" if over or bad else "ok")
+
+            def run():
+                try:
+                    r_ = job()
+                finally:
+                    self.ui(lambda: setattr(self, "_conv_running", False))
+                self.ui(lambda: done(r_))
+            threading.Thread(target=run, daemon=True).start()
 
         # ================= toasts =================
         def toast(self, title, msg="", kind="ok", ms=4500):
@@ -1801,7 +2835,9 @@ def run_gui():
             self.banner_lbl.configure(text=f"7TV {what} link copied. Looking it up…")
             self.banner_save.configure(state="disabled" if kind != "emote" else "normal",
                                        text="Save now" if kind == "emote" else "Open to save")
-            self.banner.grid(row=2, column=0, sticky="ew", padx=22, pady=(0, 12))
+            self._banner_visible = True
+            if getattr(self, "tab", "Emotes") == "Emotes":
+                self.banner.grid(row=2, column=0, sticky="ew", padx=22, pady=(0, 12))
             if kind != "emote":
                 self.banner_lbl.configure(text=f"7TV {what} link copied. Open it to pick emotes.")
                 self.toast("7TV link copied", "Open it in the app to pick emotes.", "info")
@@ -1835,6 +2871,7 @@ def run_gui():
             self.toast("7TV link copied", f"{ref.name}: press Save now, or use the tray menu.", "info")
 
         def hide_banner(self):
+            self._banner_visible = False
             self.banner.grid_forget()
 
         def on_clip_open(self):
@@ -2663,8 +3700,22 @@ def run_gui():
                     raise
             self.work(job, done, f"Downloading v{info['version']} from GitHub…")
 
-    root = ctk.CTk()
-    App(root)
+    try:
+        from tkinterdnd2 import TkinterDnD, DND_FILES, DND_TEXT
+
+        class Root(ctk.CTk, TkinterDnD.DnDWrapper):
+            def __init__(self, *a, **k):
+                super().__init__(*a, **k)
+                self.TkdndVersion = TkinterDnD._require(self)
+        root = Root()
+        root._dnd = (DND_FILES, DND_TEXT)
+    except Exception:
+        root = ctk.CTk()
+        root._dnd = None
+    app = App(root)
+    if start_hidden:
+        root.withdraw()
+        root.after(4000, lambda: None if app.tray else app.show_window())  # no tray? show the window after all
     root.mainloop()
 
 
@@ -2731,6 +3782,8 @@ if __name__ == "__main__":
             apply_update(info)
             print("Done.")
             os._exit(0)
+    elif len(sys.argv) > 1 and sys.argv[1] == "--tray":
+        run_gui(start_hidden=True)
     elif len(sys.argv) > 1:
         run_cli(sys.argv[1:])
     else:
