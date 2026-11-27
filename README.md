@@ -59,7 +59,7 @@ The **Converter** tab is for doing it all yourself, without uploading your files
    - **Sticker**: 320×320, up to 512 KB.
    - **Custom**: any size and file size limit.
 3. Fine-tune:
-   - **Format**: Auto, GIF, PNG or WebP.
+   - **Format**: Auto, GIF or PNG. Auto picks GIF for animated files and PNG for still ones.
    - **Fit**: Fill, Stretch, Bars or Crop.
    - **Scaling**: Smooth, or **Pixel art** for crisp pixels.
    - **Colours** and **Frame rate**.
@@ -74,7 +74,7 @@ Drop files, a folder, or a 7TV link anywhere on the window:
 - On the **Emotes** tab, they're loaded to be cut. A folder becomes a list you can save all at once.
 - On the **Converter** tab, they're added to the list.
 
-**Tray icon:** when you close the window, the app keeps running in the system tray by default. Click the tray icon (left or right) to open the tray panel. It shows the app's status and the last copied 7TV emote with a **Save** button, plus Browse 7TV, Open emotes folder, Settings, Check for updates, **Open app** and **Exit**. **Settings** has pages for General (tray, start with Windows, copied-link notice), Saving (folder, piece size, keep originals), Updates and About.
+**Tray icon:** when you close the window, the app keeps running in the system tray by default. Left-click the tray icon to open the app, or right-click it to open the tray panel. It shows the app's status and the last copied 7TV emote with a **Save** button, plus Browse 7TV, Open emotes folder, Settings, Check for updates, **Open app** and **Exit**. **Settings** has pages for General (tray, start with Windows, copied-link notice), Saving (folder, piece size, keep originals), Updates and About.
 
 ## What it does to the files
 

@@ -2,6 +2,10 @@
 
 Every release gets an entry here. The release build fails without one, and the text becomes the GitHub release notes and the app's "What's new" window.
 
+## v1.5.1 — 2026-11-27
+- Left-click the tray icon to open the app; right-click opens the tray panel
+- The Converter now makes only GIF and PNG, the formats that matter for Discord emotes (Auto picks GIF for animated, PNG for still)
+
 ## v1.5.0 — 2026-11-27
 - New **Converter** tab: turn any image, GIF, WebP, AVIF or video (MP4, WebM, MOV…) into a Discord emoji, a sticker or any custom size, all on your own PC
   - Presets for Emoji (128×128, 256 KB) and Sticker (320×320, 512 KB), or a custom size and file size limit

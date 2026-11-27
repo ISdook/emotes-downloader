@@ -36,7 +36,7 @@ except ImportError:  # pragma: no cover
     print("Pillow is missing. Install it with:  python -m pip install pillow")
     sys.exit(1)
 
-__version__ = "1.5.0"
+__version__ = "1.5.1"
 UA = f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) emotes-downloader/{__version__}"
 GITHUB_REPO = "ISdook/emotes-downloader"
 PORTABLE_ASSET = "Emotes-Downloader-Portable.exe"
@@ -617,18 +617,8 @@ def retime(frames, fps):
     return [(im, max(20, int(round(d)))) for im, d in out]
 
 
-def _encode_webp(frames, quality):
-    buf = io.BytesIO()
-    imgs = [f for f, _ in frames]
-    kw = dict(quality=quality, method=4)
-    if len(imgs) > 1:
-        kw.update(save_all=True, append_images=imgs[1:], duration=[d for _, d in frames], loop=0)
-    imgs[0].save(buf, "WEBP", **kw)
-    return buf.getvalue()
-
-
 def convert_media(frames, width, height, fmt="auto", fit="auto", pixel=False, colors=256, fps=None, limit_kb=256):
-    """Resize/convert frames. Returns dict(data, ext, note, size, frames)."""
+    """Resize/convert frames to GIF (animated) or PNG (still). Returns dict(data, ext, note, size, frames)."""
     method = Image.Resampling.NEAREST if pixel else LANCZOS
     animated = len(frames) > 1
     fr = retime(frames, fps) if animated else frames[:1]
@@ -679,16 +669,6 @@ def convert_media(frames, width, height, fmt="auto", fit="auto", pixel=False, co
             if fits(data):
                 if c < colors or (c < 256 and colors >= 256):
                     notes.append(f"{c} colours")
-                if scale < 1:
-                    notes.append(f"{round(width * scale)}×{round(height * scale)} px")
-                break
-    elif fmt == "webp":
-        for q, scale in ([(90, 1.0)] + ([(80, 1), (70, 1), (60, 1), (50, 1), (40, 1), (60, .75), (50, .5)] if limit else [])):
-            src = fr if scale >= 1 else shrink(fr, scale)
-            data = _encode_webp(src, q)
-            if fits(data):
-                if q < 90:
-                    notes.append(f"quality {q}")
                 if scale < 1:
                     notes.append(f"{round(width * scale)}×{round(height * scale)} px")
                 break
@@ -2404,7 +2384,9 @@ def run_gui(start_hidden=False):
                 sg.set(cfg.get(key, default))
                 sg.grid(row=row + 1, column=0, **pad)
                 return sg
-            self.cv_fmt = seg_row(5, "Format", ["Auto", "GIF", "PNG", "WebP"], "fmt", "Auto")
+            if cfg.get("fmt") not in ("Auto", "GIF", "PNG"):
+                cfg["fmt"] = "Auto"
+            self.cv_fmt = seg_row(5, "Format", ["Auto", "GIF", "PNG"], "fmt", "Auto")
             self.cv_fit = seg_row(7, "Fit", list(FITS), "fit", "Fill")
             self.cv_scale = seg_row(9, "Scaling", ["Smooth", "Pixel art"], "scale", "Smooth")
             self.cv_fps = seg_row(11, "Frame rate", ["Keep", "30", "20", "15", "10"], "fps", "Keep")
@@ -2470,7 +2452,7 @@ def run_gui(start_hidden=False):
             kb = None if lim == "No limit" else (int(lim.split()[0]) * (1024 if "MB" in lim else 1))
             fps = self.cv_fps.get()
             return dict(width=num(self.cv_w, 128), height=num(self.cv_h, 128),
-                        fmt={"Auto": "auto", "GIF": "gif", "PNG": "png", "WebP": "webp"}[self.cv_fmt.get()],
+                        fmt={"Auto": "auto", "GIF": "gif", "PNG": "png"}.get(self.cv_fmt.get(), "auto"),
                         fit=FITS.get(self.cv_fit.get(), "auto"), pixel=self.cv_scale.get() == "Pixel art",
                         colors=int(self.cv_colors.get()), fps=None if fps == "Keep" else int(fps), limit_kb=kb)
 
@@ -3235,9 +3217,12 @@ def run_gui(start_hidden=False):
                 app = self
 
                 class TrayIcon(pystray.Icon):
-                    """On Windows, clicking the tray icon opens our own flyout instead of the plain menu."""
+                    """Left click opens the app; right click opens our own tray panel instead of the plain menu."""
                     def _on_notify(self, wparam, lparam):
-                        if lparam in (0x0202, 0x0205):  # WM_LBUTTONUP / WM_RBUTTONUP
+                        if lparam in (0x0202, 0x0203):  # WM_LBUTTONUP / WM_LBUTTONDBLCLK: show the app
+                            app.ui(app.show_window)
+                            return
+                        if lparam == 0x0205:  # WM_RBUTTONUP: tray panel
                             try:
                                 import ctypes
                                 from ctypes import wintypes
