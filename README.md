@@ -31,22 +31,25 @@ The full history is in [CHANGELOG.md](CHANGELOG.md).
 
 ## Use it
 
-1. Paste one of these into the box and press **Load**:
-   - an emote link: `https://7tv.app/emotes/<id>`
-   - an emote set link: `https://7tv.app/emote-sets/<id>` (every emote in the set)
-   - a user link: `https://7tv.app/users/<id>` (their active set)
-   - just an emote ID, or a GIF/PNG/WebP from your PC (**Open file**)
+1. Get an emote. There are three ways:
+   - Press **🔍 Browse 7TV**. Search, or look through Trending, Top and New. Press **⬇ Save** on any emote to save it right away, or **Open** to check the cut first.
+   - Copy an emote link on [7tv.app](https://7tv.app/emotes). The app notices the copied link and shows a bar with **Save now**.
+   - Paste a link into the box and press **Load**. This works with an emote, an emote set (`https://7tv.app/emote-sets/<id>`) or a user (`https://7tv.app/users/<id>`). You can also **Open file** for a GIF/PNG/WebP on your PC.
 2. Check the cut. **Auto** picks how many square pieces the emote needs, so each piece is one full-height square. For example, the 384×112 emote [OdaMeeting](https://7tv.app/emotes/01FD667N200009ZAD9VPCVD4JX) becomes 4 pieces, `:OdaMeeting1:` to `:OdaMeeting4:`. The preview shows every piece separately with its name under it. To choose the pieces yourself, use the **Wide / Tall** buttons, and press **Auto** to go back.
 3. Pick how it fits:
    - **Fill** (default): fills each piece edge to edge.
    - **Stretch**: always stretches.
    - **Bars**: adds transparent bars.
    - **Crop**: trims the edges.
-4. Press **Save for Discord**.
-   - With a set loaded, tick the emotes you want and press **Save selected**. With nothing ticked, the button says **Save all** and saves the whole set.
-5. Upload the pieces to your server (Server Settings → Emoji), then press **Copy** and paste the text into Discord.
+4. Choose where it's saved with **Save to**, under the Save button:
+   - **App folder** (default): an `Emotes` folder next to the app.
+   - **Downloads**, **Pictures** or **Desktop**: a `7TV Emotes` folder there.
+   - **Custom folder…**: any folder you pick.
+5. Press **Save for Discord**.
+   - With a set loaded, tick the emotes you want and press **Save selected**. With nothing ticked, the button says **Save all**.
+6. Upload the pieces to your server (Server Settings → Emoji), then press **Copy** and paste the text into Discord.
 
-**⚙ Settings** has the save folder, the piece size, keeping the original file, and the update options.
+**Tray icon:** when you close the window, the app keeps running in the system tray by default. Right-click the tray icon for Browse 7TV, Save copied 7TV link, Open emotes folder, Check for updates, and Quit. You can turn this off in **⚙ Settings**, along with the piece size, keeping the original file, the copied-link notice, and the update options.
 
 ## What it does to the files
 

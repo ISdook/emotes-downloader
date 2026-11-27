@@ -11,10 +11,10 @@ if not defined PY (
 if not defined PY goto nopython
 %PY% -c "import sys" >nul 2>nul || goto nopython
 
-%PY% -c "import PIL, customtkinter" >nul 2>nul
+%PY% -c "import PIL, customtkinter, pystray" >nul 2>nul
 if errorlevel 1 (
-  echo First run: installing what the app needs ^(Pillow + CustomTkinter^)...
-  %PY% -m pip install --upgrade pillow customtkinter
+  echo First run: installing what the app needs ^(Pillow, CustomTkinter, pystray^)...
+  %PY% -m pip install --upgrade pillow customtkinter pystray
   if errorlevel 1 (
     echo.
     echo Couldn't install them. Check your internet connection and try again.

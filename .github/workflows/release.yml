@@ -38,14 +38,14 @@ jobs:
           echo "version=$V" >> "$GITHUB_OUTPUT"
 
       - name: Install build tools
-        run: pip install pillow customtkinter pyinstaller
+        run: pip install pillow customtkinter pystray pyinstaller
 
       - name: Build portable .exe
         run: >
           pyinstaller --noconfirm --clean --onefile --windowed
           --name Emotes-Downloader-Portable --icon assets/icon.ico
           --add-data "assets;assets" --add-data "CHANGELOG.md;."
-          --collect-data customtkinter --hidden-import PIL._tkinter_finder
+          --collect-data customtkinter --hidden-import PIL._tkinter_finder --hidden-import pystray._win32
           emotes_downloader.py
 
       - name: Build app folder for the installer
@@ -53,7 +53,7 @@ jobs:
           pyinstaller --noconfirm --onedir --windowed
           --name "Emotes Downloader" --icon assets/icon.ico
           --add-data "assets;assets" --add-data "CHANGELOG.md;."
-          --collect-data customtkinter --hidden-import PIL._tkinter_finder
+          --collect-data customtkinter --hidden-import PIL._tkinter_finder --hidden-import pystray._win32
           --distpath dist/app --workpath build/app
           emotes_downloader.py
 
