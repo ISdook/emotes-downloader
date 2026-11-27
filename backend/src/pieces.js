@@ -41,7 +41,7 @@ export async function cutWithImages(images, bytes, { cols, rows, animated, limit
       .input(new Response(bytes).body)
       .transform({ width: cols * size, height: rows * size, fit: "squeeze" })
       .transform({ trim: pieceBox(i, cols, size) })
-      .output({ format, anim: true });
+      .output({ format, anim: !!animated });
     const out = new Uint8Array(await res.response().arrayBuffer());
     return { bytes: out, size };
   };
@@ -64,7 +64,7 @@ export async function shrinkWithImages(images, bytes, { animated, limit }) {
     const res = await images
       .input(new Response(bytes).body)
       .transform({ width: size, height: size, fit: "scale-down" })
-      .output({ format: animated ? "image/gif" : "image/png", anim: true });
+      .output({ format: animated ? "image/gif" : "image/png", anim: !!animated });
     const out = new Uint8Array(await res.response().arrayBuffer());
     if (out.length <= limit) return out;
   }
