@@ -2,6 +2,13 @@
 
 Every release gets an entry here. The release build fails without one, and the text becomes the GitHub release notes and the app's "What's new" window.
 
+## v1.4.1 — 2026-11-27
+- Fixed: the Browse 7TV window glitched and smeared while scrolling. It's rebuilt to scroll smoothly, and it loads more emotes by itself as you reach the bottom
+- Fixed: icons showed as empty boxes on Windows (Browse 7TV, Save and others). All icons are now drawn by the app itself
+- Simpler saving: the button is now just "Save", with Save to and the folder path right under it
+- Removed the "Paste in Discord" box (and the _paste.txt file)
+- Fixed a rare problem where the app could stop reacting after an error in a background task
+
 ## v1.4.0 — 2026-11-27
 - New tray panel in the same style as Plume and LiteDock: click the tray icon (left or right) to open it
 - Shows the app's status, the last copied 7TV emote with a one-click Save, and quick actions (Browse 7TV, open the emotes folder, Settings)

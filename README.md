@@ -41,13 +41,13 @@ The full history is in [CHANGELOG.md](CHANGELOG.md).
    - **Stretch**: always stretches.
    - **Bars**: adds transparent bars.
    - **Crop**: trims the edges.
-4. Choose where it's saved with **Save to**, under the Save button:
+4. Choose where it's saved with **Save to**, under the **Save** button:
    - **App folder** (default): an `Emotes` folder next to the app.
    - **Downloads**, **Pictures** or **Desktop**: a `7TV Emotes` folder there.
    - **Custom folder…**: any folder you pick.
-5. Press **Save for Discord**.
+5. Press **Save**.
    - With a set loaded, tick the emotes you want and press **Save selected**. With nothing ticked, the button says **Save all**.
-6. Upload the pieces to your server (Server Settings → Emoji), then press **Copy** and paste the text into Discord.
+6. Upload the pieces to your server (Server Settings → Emoji), then type them next to each other in Discord, like `:OdaMeeting1::OdaMeeting2::OdaMeeting3::OdaMeeting4:`.
 
 **Tray icon:** when you close the window, the app keeps running in the system tray by default. Click the tray icon (left or right) to open the tray panel. It shows the app's status and the last copied 7TV emote with a **Save** button, plus Browse 7TV, Open emotes folder, Settings, Check for updates, **Open app** and **Exit**. You can turn this off in **⚙ Settings**, along with the piece size, keeping the original file, the copied-link notice, and the update options.
 
@@ -56,7 +56,7 @@ The full history is in [CHANGELOG.md](CHANGELOG.md).
 - **Animated emotes become GIF and static emotes become PNG.** These are the formats Discord accepts for emoji.
 - If a piece would be over 256 KB, the tool keeps **every frame** and shrinks the piece size first, down to 96, 72, 64 or 48 px. Discord never shows an emote bigger than 48 px, so this still looks sharp. Frames are only dropped as a last resort. For video-like emotes it stores only what changes between frames, which leaves room for more pixels. Every piece of one emote gets the same settings, so the pieces stay in sync.
 - Names follow Discord's rules: letters, numbers and `_`, 2 to 32 characters.
-- For cut emotes, each emote gets its own folder with the pieces and a `NAME_paste.txt`.
+- For cut emotes, each emote gets its own folder with its pieces.
 
 ## Tips
 
