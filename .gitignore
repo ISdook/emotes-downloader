@@ -6,3 +6,5 @@ dist/
 *.py.bak
 *.py.new
 *.new.exe
+release_notes.md
+py/

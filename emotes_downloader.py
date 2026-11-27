@@ -8,6 +8,8 @@ Emotes Downloader - 7TV -> Discord
 * Optionally cuts wide/big emotes into pieces (KEKW1, KEKW2, ...) and
   writes the text to paste in Discord (":KEKW1::KEKW2:").
 
+Needs: pillow, customtkinter  (run.bat installs them)
+
 Run with no arguments for the window, or use the command line:
     python emotes_downloader.py https://7tv.app/emotes/<id> --split auto
 """
@@ -33,16 +35,17 @@ except ImportError:  # pragma: no cover
     print("Pillow is missing. Install it with:  python -m pip install pillow")
     sys.exit(1)
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
+UA = f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) emotes-downloader/{__version__}"
 GITHUB_REPO = "ISdook/emotes-downloader"
-EXE_ASSET = "emotes-downloader.exe"
+PORTABLE_ASSET = "Emotes-Downloader-Portable.exe"
+SETUP_ASSET = "Emotes-Downloader-Setup.exe"
+LEGACY_EXE_ASSET = "emotes-downloader.exe"   # v1.0.0 portable name
 SCRIPT_ASSET = "emotes_downloader.py"
-RELEASES_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+RELEASES_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases"
 RELEASES_PAGE = f"https://github.com/{GITHUB_REPO}/releases/latest"
 
-APP_NAME = f"Emotes Downloader v{__version__}  ·  7TV → Discord"
 API = "https://7tv.io/v3"
-UA = f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) emotes-downloader/{__version__}"
 DISCORD_LIMIT = 256 * 1024          # Discord emoji upload limit
 SAFE_LIMIT = DISCORD_LIMIT - 2048    # small safety margin
 MAX_GRID = 10
@@ -388,7 +391,7 @@ def make_emote(frames, name, out_dir, mode="none", cols=1, rows=1, tile=128,
 
 
 # --------------------------------------------------------------------------
-# Auto-updater (GitHub Releases)
+# Auto-updater (GitHub Releases) + changelog
 # --------------------------------------------------------------------------
 
 def parse_version(v):
@@ -400,13 +403,34 @@ def is_frozen():
     return bool(getattr(sys, "frozen", False))
 
 
+def install_kind():
+    """'setup' (installed with the setup .exe), 'portable' (.exe) or 'python'."""
+    if not is_frozen():
+        return "python"
+    if (Path(sys.executable).parent / "unins000.exe").exists():
+        return "setup"
+    return "portable"
+
+
+KIND_LABEL = {"setup": "Installed", "portable": "Portable", "python": "Python"}
+
+
+def resource_path(rel):
+    base = getattr(sys, "_MEIPASS", None) or Path(__file__).resolve().parent
+    return Path(base) / rel
+
+
+def _gh_json(url):
+    return json.loads(http_get(url, timeout=15, site="GitHub",
+                               accept="application/vnd.github+json").decode("utf-8"))
+
+
 def check_for_update():
     """Return info about a newer release, or None if up to date / no releases yet."""
     try:
-        d = json.loads(http_get(RELEASES_API, timeout=15, site="GitHub",
-                                accept="application/vnd.github+json").decode("utf-8"))
+        d = _gh_json(f"{RELEASES_API}/latest")
     except NotFound:
-        return None  # repo has no releases yet
+        return None  # no releases yet
     tag = d.get("tag_name") or ""
     if parse_version(tag) <= parse_version(__version__):
         return None
@@ -415,32 +439,127 @@ def check_for_update():
                 assets={a["name"]: a["browser_download_url"] for a in d.get("assets") or []})
 
 
-def _relaunch(cmd):
-    flags = 0
+_CL_HEAD = re.compile(r"^##\s*\[?v?(\d+(?:\.\d+){1,2})\]?\s*(?:[-—–·]\s*(.*))?$")
+
+
+def parse_changelog(text):
+    """CHANGELOG.md -> [(version, date, notes)] newest first."""
+    out, cur = [], None
+    for line in (text or "").splitlines():
+        m = _CL_HEAD.match(line.strip())
+        if m:
+            cur = [m.group(1), (m.group(2) or "").strip(), []]
+            out.append(cur)
+        elif cur is not None:
+            cur[2].append(line)
+    return [(v, d, "\n".join(n).strip()) for v, d, n in out]
+
+
+def local_changelog():
+    try:
+        return parse_changelog(resource_path("CHANGELOG.md").read_text(encoding="utf-8"))
+    except Exception:
+        return []
+
+
+def get_changelog(after=None, upto=None):
+    """Changelog entries with after < version <= upto, newest first (GitHub first, bundled file as fallback)."""
+    lo = parse_version(after) if after else (0, 0, 0)
+    hi = parse_version(upto) if upto else (999, 0, 0)
+    entries = []
+    try:
+        for r in _gh_json(f"{RELEASES_API}?per_page=40"):
+            if r.get("draft") or r.get("prerelease"):
+                continue
+            entries.append((r["tag_name"].lstrip("vV"), (r.get("published_at") or "")[:10],
+                            (r.get("body") or "").strip()))
+    except Exception:
+        pass
+    pick = [e for e in entries if lo < parse_version(e[0]) <= hi]
+    if not pick:
+        pick = [e for e in local_changelog() if lo < parse_version(e[0]) <= hi]
+    return sorted(pick, key=lambda e: parse_version(e[0]), reverse=True)
+
+
+def format_changelog(entries):
+    blocks = []
+    for v, date, notes in entries:
+        body = "\n".join("•  " + l.strip()[2:] if l.strip()[:2] in ("- ", "* ") else l.rstrip()
+                         for l in notes.splitlines() if l.strip())
+        blocks.append(f"v{v}" + (f"   ·   {date}" if date else "") + "\n" + (body or "•  (no notes)"))
+    return "\n\n".join(blocks) or "No changelog available."
+
+
+def download(url, progress=None, timeout=60):
+    req = urllib.request.Request(url, headers={"User-Agent": UA})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            total = int(r.headers.get("Content-Length") or 0)
+            buf, done = io.BytesIO(), 0
+            while True:
+                chunk = r.read(256 * 1024)
+                if not chunk:
+                    break
+                buf.write(chunk)
+                done += len(chunk)
+                if progress and total:
+                    progress(done / total)
+            return buf.getvalue()
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"GitHub returned HTTP {e.code} for {url}") from None
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"Couldn't reach GitHub ({e.reason}).") from None
+
+
+def _detached():
     if sys.platform.startswith("win"):
-        flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
-    subprocess.Popen(cmd, creationflags=flags, close_fds=True)
+        return subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+    return 0
 
 
-def apply_update(info):
-    """Download and install the update. The caller must exit the app right after."""
-    if is_frozen():
-        url = info["assets"].get(EXE_ASSET) or next(
-            (u for n, u in info["assets"].items() if n.lower().endswith(".exe")), None)
+def _relaunch(cmd):
+    subprocess.Popen(cmd, creationflags=_detached(), close_fds=True)
+
+
+def _check_exe(data):
+    if len(data) < 1_000_000 or data[:2] != b"MZ":
+        raise RuntimeError("The downloaded file looks broken, update cancelled.")
+
+
+def apply_update(info, progress=None):
+    """Download and start installing the update. The caller must quit the app right after."""
+    kind = install_kind()
+    assets = info["assets"]
+
+    if kind == "setup":
+        url = assets.get(SETUP_ASSET)
         if not url:
-            raise RuntimeError("This release has no .exe yet (it may still be building). Try again in a few minutes.")
+            raise RuntimeError("This release has no setup .exe yet (it may still be building). Try again in a few minutes.")
+        data = download(url, progress, timeout=180)
+        _check_exe(data)
+        path = Path(tempfile.gettempdir()) / f"Emotes-Downloader-Setup-{info['version']}.exe"
+        path.write_bytes(data)
+        # The installer closes this app, updates it in place and starts it again.
+        subprocess.Popen([str(path), "/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS"],
+                         creationflags=_detached(), close_fds=True)
+        return
+
+    if kind == "portable":
+        url = assets.get(PORTABLE_ASSET) or assets.get(LEGACY_EXE_ASSET)
+        if not url:
+            raise RuntimeError("This release has no portable .exe yet (it may still be building). Try again in a few minutes.")
         exe = Path(sys.executable).resolve()
-        data = http_get(url, timeout=120, site="GitHub")
-        if len(data) < 1_000_000 or data[:2] != b"MZ":
-            raise RuntimeError("The downloaded .exe looks broken, update cancelled.")
+        data = download(url, progress, timeout=180)
+        _check_exe(data)
         new = exe.with_name(exe.stem + ".new.exe")
         new.write_bytes(data)
-        bat = Path(tempfile.gettempdir()) / f"emotes_downloader_update_{os.getpid()}.bat"
+        pid = os.getpid()
+        bat = Path(tempfile.gettempdir()) / f"emotes_downloader_update_{pid}.bat"
         bat.write_text(
             "@echo off\r\n"
             "set n=0\r\n"
             ":wait\r\n"
-            f'tasklist /FI "PID eq {os.getpid()}" 2>nul | find "{os.getpid()}" >nul && '
+            f'tasklist /FI "PID eq {pid}" 2>nul | find "{pid}" >nul && '
             "(timeout /t 1 /nobreak >nul & goto wait)\r\n"
             ":move\r\n"
             f'move /y "{new}" "{exe}" >nul 2>nul\r\n'
@@ -452,20 +571,28 @@ def apply_update(info):
             ":done\r\n"
             f'start "" "{exe}"\r\n'
             'del "%~f0"\r\n', encoding="utf-8")
-        flags = subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS
-        subprocess.Popen(["cmd", "/c", str(bat)], creationflags=flags, close_fds=True)
+        subprocess.Popen(["cmd", "/c", str(bat)],
+                         creationflags=subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS, close_fds=True)
         return
 
+    # Python version: replace this script (and the changelog), then restart.
     script = Path(__file__).resolve()
-    url = info["assets"].get(SCRIPT_ASSET) or \
-        f"https://raw.githubusercontent.com/{GITHUB_REPO}/{info['tag']}/emotes_downloader.py"
-    code = http_get(url, timeout=60, site="GitHub")
+    raw_base = f"https://raw.githubusercontent.com/{GITHUB_REPO}/{info['tag']}"
+    code = download(assets.get(SCRIPT_ASSET) or f"{raw_base}/emotes_downloader.py", progress)
     try:
         compile(code, str(script), "exec")
     except SyntaxError as e:
         raise RuntimeError(f"The downloaded update is broken ({e}), update cancelled.") from None
     if b"__version__" not in code:
         raise RuntimeError("The downloaded file isn't this app, update cancelled.")
+    for extra in ("CHANGELOG.md", "assets/icon.png", "assets/icon.ico"):
+        try:
+            data = download(f"{raw_base}/{extra}")
+            dest = script.parent / extra
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(data)
+        except Exception:
+            pass
     script.with_suffix(".py.bak").write_bytes(script.read_bytes())
     tmp = script.with_suffix(".py.new")
     tmp.write_bytes(code)
@@ -479,16 +606,23 @@ def apply_update(info):
 # Settings
 # --------------------------------------------------------------------------
 
+DEFAULTS = dict(mode="auto", cols=2, rows=2, fit="contain", tile=128, keep_original=False,
+                check_updates=True, auto_install=True)
+
+
 def default_out_dir():
     dl = Path.home() / "Downloads"
     return str((dl if dl.is_dir() else Path.home()) / "7TV Emotes")
 
 
 def load_config():
+    cfg = dict(DEFAULTS)
     try:
-        return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        cfg.update(json.loads(CONFIG_PATH.read_text(encoding="utf-8")))
     except Exception:
-        return {}
+        pass
+    cfg.setdefault("out_dir", default_out_dir())
+    return cfg
 
 
 def save_config(cfg):
@@ -508,273 +642,331 @@ def open_folder(path):
         subprocess.Popen(["xdg-open", path])
 
 
+def paste_text(name, cols, rows):
+    n = cols * rows
+    base = sanitize_name(name, len(str(n)) if n > 1 else 0)
+    names = [base] if n == 1 else [f"{base}{i}" for i in range(1, n + 1)]
+    return "\n".join("".join(f":{names[r * cols + c]}:" for c in range(cols)) for r in range(rows))
+
+
 # --------------------------------------------------------------------------
 # GUI
 # --------------------------------------------------------------------------
 
-BG, PANEL, FIELD = "#1e1f22", "#2b2d31", "#383a40"
-FG, MUTED, ACCENT, ACCENT_HI = "#dbdee1", "#949ba4", "#5865f2", "#4752c4"
-GOOD, BAD = "#23a55a", "#f23f43"
-FIT_LABELS = {"Fit inside (pad)": "contain", "Fill (crop edges)": "cover", "Stretch": "stretch"}
+C = dict(
+    bg="#0d0f14", card="#151821", card_hi="#1c2030", border="#252a38", field="#0f1218",
+    text="#eceef4", muted="#8b91a5", faint="#5c6275",
+    accent="#7c5cff", accent_hover="#6847f5", blue="#3d8bff", blue_hover="#2f78e8",
+    good="#34c77b", bad="#ff5d6e", warn="#f5b14c", discord="#313338",
+)
+MODES = {"None": "none", "Auto": "auto", "Grid": "custom"}
+FITS = {"Pad": "contain", "Crop": "cover", "Stretch": "stretch"}
+MODE_HELP = {"none": "Saved as one emote.",
+             "auto": "Wide emotes are cut into square pieces.",
+             "custom": "Cut into the grid you choose."}
+
+
+def _import_ctk():
+    try:
+        import customtkinter as ctk
+        return ctk
+    except ImportError:
+        pass
+    if not is_frozen():  # Python version: install the UI library on the fly
+        subprocess.run([sys.executable, "-m", "pip", "install", "-q", "customtkinter"],
+                       creationflags=subprocess.CREATE_NO_WINDOW if sys.platform.startswith("win") else 0)
+        try:
+            import customtkinter as ctk
+            return ctk
+        except ImportError:
+            pass
+    import tkinter as tk
+    from tkinter import messagebox
+    r = tk.Tk()
+    r.withdraw()
+    messagebox.showerror("Emotes Downloader",
+                         "The UI library 'customtkinter' is missing.\n\nInstall it with:\n  python -m pip install customtkinter")
+    sys.exit(1)
 
 
 def run_gui():
+    ctk = _import_ctk()
     import tkinter as tk
-    from tkinter import ttk, filedialog, messagebox
+    from tkinter import filedialog
     from PIL import ImageTk
+    try:
+        import PIL._tkinter_finder  # noqa: F401  (makes PyInstaller bundle it; ImageTk needs it)
+    except ImportError:
+        pass
 
     if sys.platform.startswith("win"):
         try:
             import ctypes
-            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("ISdook.EmotesDownloader")
         except Exception:
             pass
 
-    class App:
-        PW, PH = 440, 250  # preview area
+    ctk.set_appearance_mode("dark")
+    FAMILY = "Segoe UI" if sys.platform.startswith("win") else "DejaVu Sans"
+    MONO = "Consolas" if sys.platform.startswith("win") else "DejaVu Sans Mono"
 
+    def set_icon(win):
+        def apply():
+            try:
+                ico = resource_path("assets/icon.ico")
+                if sys.platform.startswith("win") and ico.exists():
+                    win.iconbitmap(str(ico))
+                else:
+                    png = resource_path("assets/icon.png")
+                    if png.exists():
+                        win._icon_ref = tk.PhotoImage(file=str(png))
+                        win.iconphoto(False, win._icon_ref)
+            except Exception:
+                pass
+        win.after(250, apply)  # after CustomTkinter sets its own icon
+
+    class App:
         def __init__(self, root):
             self.root = root
             self.cfg = load_config()
             self.q = queue.Queue()
-            self.items = []          # dicts: name, ref, path, frames, raw
+            self.items = []
+            self.rows = []
             self.current = None
+            self.set_title = None
             self.anim_job = None
             self.anim_imgs = []
             self.busy = False
+            self.update_info = None
+            self.log_lines = []
+            self.F = lambda size, bold=False: ctk.CTkFont(family=FAMILY, size=size,
+                                                         weight="bold" if bold else "normal")
             self._build()
             self._poll()
-            if self.cfg.get("auto_update", True):
-                self.root.after(1500, lambda: self.check_updates(False))
+            self.root.after(400, self._after_start)
 
-        # ---------- layout ----------
+        # ================= layout =================
+        def card(self, parent, **kw):
+            return ctk.CTkFrame(parent, fg_color=C["card"], corner_radius=16, border_width=1,
+                                border_color=C["border"], **kw)
+
+        def label(self, parent, text, size=13, color="text", bold=False, **kw):
+            return ctk.CTkLabel(parent, text=text, font=self.F(size, bold), text_color=C[color], **kw)
+
+        def section(self, parent, text):
+            return ctk.CTkLabel(parent, text=text.upper(), font=self.F(11, True), text_color=C["muted"], anchor="w")
+
+        def button(self, parent, text, cmd, kind="ghost", **kw):
+            styles = {
+                "accent": dict(fg_color=C["accent"], hover_color=C["accent_hover"], text_color="white"),
+                "blue": dict(fg_color=C["blue"], hover_color=C["blue_hover"], text_color="white"),
+                "ghost": dict(fg_color=C["card_hi"], hover_color=C["border"], text_color=C["text"]),
+                "flat": dict(fg_color="transparent", hover_color=C["card_hi"], text_color=C["muted"]),
+            }
+            opts = dict(corner_radius=10, height=36, font=self.F(13, kind in ("accent", "blue")))
+            opts.update(styles[kind])
+            opts.update(kw)
+            return ctk.CTkButton(parent, text=text, command=cmd, **opts)
+
+        def segmented(self, parent, values, cmd):
+            return ctk.CTkSegmentedButton(
+                parent, values=values, command=cmd, height=34, corner_radius=10, font=self.F(13),
+                fg_color=C["field"], selected_color=C["accent"], selected_hover_color=C["accent_hover"],
+                unselected_color=C["field"], unselected_hover_color=C["card_hi"], text_color=C["text"])
+
         def _build(self):
             r = self.root
-            r.title(APP_NAME)
-            r.configure(bg=BG)
-            r.minsize(1000, 760)
-            st = ttk.Style(r)
-            st.theme_use("clam")
-            st.configure(".", background=BG, foreground=FG, fieldbackground=FIELD,
-                         bordercolor=PANEL, lightcolor=PANEL, darkcolor=PANEL,
-                         troughcolor=PANEL, font=("Segoe UI", 10))
-            st.configure("TFrame", background=BG)
-            st.configure("Panel.TFrame", background=PANEL)
-            st.configure("TLabel", background=BG, foreground=FG)
-            st.configure("Panel.TLabel", background=PANEL, foreground=FG)
-            st.configure("Muted.TLabel", background=PANEL, foreground=MUTED, font=("Segoe UI", 9))
-            st.configure("Head.TLabel", background=BG, foreground=FG, font=("Segoe UI Semibold", 15))
-            st.configure("Sub.TLabel", background=BG, foreground=MUTED, font=("Segoe UI", 9))
-            st.configure("Sec.TLabel", background=PANEL, foreground=MUTED, font=("Segoe UI Semibold", 9))
-            st.configure("TButton", background=FIELD, foreground=FG, borderwidth=0, padding=(12, 6))
-            st.map("TButton", background=[("disabled", PANEL), ("active", "#4e5058")],
-                   foreground=[("disabled", MUTED)])
-            st.configure("Accent.TButton", background=ACCENT, foreground="white",
-                         font=("Segoe UI Semibold", 10), padding=(14, 8))
-            st.map("Accent.TButton", background=[("disabled", PANEL), ("active", ACCENT_HI)])
-            st.configure("TEntry", fieldbackground=FIELD, foreground=FG, insertcolor=FG,
-                         borderwidth=0, padding=6)
-            st.configure("TSpinbox", fieldbackground=FIELD, foreground=FG, arrowcolor=FG,
-                         background=FIELD, borderwidth=0, padding=4, insertcolor=FG)
-            st.configure("TCombobox", fieldbackground=FIELD, foreground=FG, arrowcolor=FG,
-                         background=FIELD, borderwidth=0, padding=4)
-            st.map("TCombobox", fieldbackground=[("readonly", FIELD)], foreground=[("readonly", FG)])
-            r.option_add("*TCombobox*Listbox.background", FIELD)
-            r.option_add("*TCombobox*Listbox.foreground", FG)
-            st.configure("TRadiobutton", background=PANEL, foreground=FG, indicatorbackground=FIELD)
-            st.map("TRadiobutton", background=[("active", PANEL)], indicatorbackground=[("selected", ACCENT)])
-            st.configure("TCheckbutton", background=PANEL, foreground=FG, indicatorbackground=FIELD)
-            st.map("TCheckbutton", background=[("active", PANEL)], indicatorbackground=[("selected", ACCENT)])
-            st.configure("Vertical.TScrollbar", background=FIELD, troughcolor=FIELD, bordercolor=FIELD,
-                         arrowcolor=MUTED, gripcount=0)
-            st.map("Vertical.TScrollbar", background=[("active", "#4e5058")])
+            r.title("Emotes Downloader")
+            r.configure(fg_color=C["bg"])
+            r.geometry("1180x760")
+            r.minsize(1020, 680)
+            set_icon(r)
+            r.grid_columnconfigure(0, weight=1)
+            r.grid_rowconfigure(2, weight=1)
 
-            outer = ttk.Frame(r, padding=14)
-            outer.pack(fill="both", expand=True)
+            # ---- top bar
+            top = ctk.CTkFrame(r, fg_color="transparent")
+            top.grid(row=0, column=0, sticky="ew", padx=22, pady=(18, 10))
+            top.grid_columnconfigure(1, weight=1)
+            try:
+                logo = Image.open(resource_path("assets/icon.png"))
+                self._logo = ctk.CTkImage(logo, logo, size=(38, 38))
+                ctk.CTkLabel(top, text="", image=self._logo).grid(row=0, column=0, rowspan=2, padx=(0, 12))
+            except Exception as e:  # noqa
+                self.log_lines.append(f"Couldn't load the logo: {e!r}")
+            tbox = ctk.CTkFrame(top, fg_color="transparent")
+            tbox.grid(row=0, column=1, sticky="w")
+            self.label(tbox, "Emotes Downloader", 20, bold=True).pack(side="left")
+            self.label(tbox, f"  v{__version__}", 12, "faint").pack(side="left", pady=(6, 0))
+            self.label(top, "7TV emotes → Discord, resized and cut into pieces", 12, "muted").grid(
+                row=1, column=1, sticky="w")
 
-            head = ttk.Frame(outer)
-            head.grid(row=0, column=0, sticky="ew")
-            head.columnconfigure(1, weight=1)
-            ttk.Label(head, text="Emotes Downloader", style="Head.TLabel").grid(row=0, column=0, sticky="w")
-            ttk.Label(head, text=f"  v{__version__}", style="Sub.TLabel").grid(row=0, column=1, sticky="sw", pady=(0, 3))
-            self.update_banner = ttk.Frame(head)
-            self.update_banner.grid(row=0, column=2, sticky="e", padx=(0, 8))
-            self.update_msg = ttk.Label(self.update_banner, text="", foreground=GOOD)
-            self.update_msg.pack(side="left", padx=(0, 8))
-            self.update_btn = ttk.Button(self.update_banner, text="Update now", style="Accent.TButton",
-                                         command=self.on_update_now)
-            self.check_btn = ttk.Button(head, text="Check for updates", command=lambda: self.check_updates(True))
-            self.check_btn.grid(row=0, column=3, sticky="e")
-            self.update_info = None
-            ttk.Label(outer, text="7TV link → Discord-ready emotes  ·  emote, emote-set or user link, an ID, or a local GIF/PNG/WebP",
-                      style="Sub.TLabel").grid(row=1, column=0, sticky="w", pady=(0, 10))
+            right = ctk.CTkFrame(top, fg_color="transparent")
+            right.grid(row=0, column=2, rowspan=2, sticky="e")
+            self.update_btn = self.button(right, "Check for updates", self.on_update_btn, "ghost",
+                                          corner_radius=18, height=34)
+            self.update_btn.pack(side="left", padx=(0, 8))
+            self.button(right, "What's new", self.show_changelog, "flat", width=96, height=34).pack(side="left", padx=(0, 4))
+            self.button(right, "⚙  Settings", self.open_settings, "flat", width=100, height=34).pack(side="left")
 
-            # input row
-            top = ttk.Frame(outer)
-            top.grid(row=2, column=0, sticky="ew")
-            top.columnconfigure(0, weight=1)
-            self.url_var = tk.StringVar()
-            e = ttk.Entry(top, textvariable=self.url_var)
-            e.grid(row=0, column=0, sticky="ew", ipady=2)
-            e.bind("<Return>", lambda _e: self.on_load())
-            e.focus_set()
-            self.load_btn = ttk.Button(top, text="Load", style="Accent.TButton", command=self.on_load)
-            self.load_btn.grid(row=0, column=1, padx=(8, 0))
-            ttk.Button(top, text="Open file…", command=self.on_open_file).grid(row=0, column=2, padx=(8, 0))
+            # ---- input bar
+            bar = ctk.CTkFrame(r, fg_color="transparent")
+            bar.grid(row=1, column=0, sticky="ew", padx=22, pady=(0, 14))
+            bar.grid_columnconfigure(0, weight=1)
+            self.url_entry = ctk.CTkEntry(
+                bar, height=48, corner_radius=12, border_width=1, border_color=C["border"],
+                fg_color=C["card"], text_color=C["text"], placeholder_text_color=C["faint"], font=self.F(14),
+                placeholder_text="Paste a 7TV emote, emote-set or user link…")
+            self.url_entry.grid(row=0, column=0, sticky="ew")
+            self.url_entry.bind("<Return>", lambda _e: self.on_load())
+            self.load_btn = self.button(bar, "Load", self.on_load, "accent", width=110, height=48, corner_radius=12)
+            self.load_btn.grid(row=0, column=1, padx=(10, 0))
+            self.button(bar, "Open file", self.on_open_file, "ghost", width=110, height=48,
+                        corner_radius=12).grid(row=0, column=2, padx=(10, 0))
 
-            # main row
-            main = ttk.Frame(outer)
-            main.grid(row=3, column=0, sticky="nsew", pady=12)
-            outer.rowconfigure(3, weight=1)
-            outer.columnconfigure(0, weight=1)
-            main.columnconfigure(1, weight=1)
-            main.rowconfigure(0, weight=1)
+            # ---- body
+            body = ctk.CTkFrame(r, fg_color="transparent")
+            body.grid(row=2, column=0, sticky="nsew", padx=22)
+            body.grid_columnconfigure(1, weight=1)
+            body.grid_rowconfigure(0, weight=1)
+            self.body = body
 
-            # left: list
-            left = ttk.Frame(main, style="Panel.TFrame", padding=10)
-            left.grid(row=0, column=0, sticky="nsw")
-            left.rowconfigure(1, weight=1)
-            self.list_title = ttk.Label(left, text="EMOTES", style="Sec.TLabel")
-            self.list_title.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
-            self.listbox = tk.Listbox(left, width=24, bg=FIELD, fg=FG, selectbackground=ACCENT,
-                                      selectforeground="white", highlightthickness=0, borderwidth=0,
-                                      activestyle="none", exportselection=False, selectmode="extended",
-                                      font=("Segoe UI", 10))
-            self.listbox.grid(row=1, column=0, sticky="ns")
-            sb = ttk.Scrollbar(left, orient="vertical", command=self.listbox.yview)
-            sb.grid(row=1, column=1, sticky="ns")
-            self.listbox.config(yscrollcommand=sb.set)
-            self.listbox.bind("<<ListboxSelect>>", self.on_select)
-            ttk.Label(left, text="Ctrl/Shift-click to pick several", style="Muted.TLabel").grid(
-                row=2, column=0, columnspan=2, sticky="w", pady=(6, 0))
+            # sidebar (only for sets)
+            self.side = self.card(body, width=250)
+            self.side.grid_rowconfigure(1, weight=1)
+            self.side.grid_columnconfigure(0, weight=1)
+            sh = ctk.CTkFrame(self.side, fg_color="transparent")
+            sh.grid(row=0, column=0, sticky="ew", padx=14, pady=(14, 6))
+            self.side_title = self.section(sh, "Emotes")
+            self.side_title.pack(side="left")
+            self.all_var = tk.BooleanVar(value=False)
+            ctk.CTkCheckBox(sh, text="All", variable=self.all_var, command=self.on_check_all, width=20,
+                            checkbox_width=18, checkbox_height=18, corner_radius=5, font=self.F(12),
+                            fg_color=C["accent"], hover_color=C["accent_hover"], border_color=C["faint"],
+                            text_color=C["muted"]).pack(side="right")
+            self.list_frame = ctk.CTkScrollableFrame(self.side, fg_color="transparent", width=220,
+                                                     scrollbar_button_color=C["card_hi"],
+                                                     scrollbar_button_hover_color=C["border"])
+            self.list_frame.grid(row=1, column=0, sticky="nsew", padx=6, pady=(0, 10))
 
-            # middle: preview
-            mid = ttk.Frame(main, style="Panel.TFrame", padding=10)
-            mid.grid(row=0, column=1, sticky="nsew", padx=12)
-            mid.columnconfigure(0, weight=1)
-            ttk.Label(mid, text="PREVIEW  (dashed lines = where it gets cut)", style="Sec.TLabel").grid(
-                row=0, column=0, sticky="w", pady=(0, 6))
-            self.canvas = tk.Canvas(mid, width=self.PW, height=self.PH, bg="#111214",
-                                    highlightthickness=0)
-            self.canvas.grid(row=1, column=0, sticky="nsew")
-            mid.rowconfigure(1, weight=1)
+            # preview
+            prev = self.card(body)
+            prev.grid(row=0, column=1, sticky="nsew")
+            prev.grid_columnconfigure(0, weight=1)
+            prev.grid_rowconfigure(1, weight=1)
+            ph = ctk.CTkFrame(prev, fg_color="transparent")
+            ph.grid(row=0, column=0, sticky="ew", padx=18, pady=(16, 8))
+            self.section(ph, "Preview").pack(side="left")
+            self.info_lbl = self.label(ph, "", 12, "muted")
+            self.info_lbl.pack(side="right")
+            cv_wrap = ctk.CTkFrame(prev, fg_color=C["discord"], corner_radius=12)
+            cv_wrap.grid(row=1, column=0, sticky="nsew", padx=18)
+            cv_wrap.grid_columnconfigure(0, weight=1)
+            cv_wrap.grid_rowconfigure(0, weight=1)
+            self.canvas = tk.Canvas(cv_wrap, bg=C["discord"], highlightthickness=0, bd=0)
+            self.canvas.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
             self.canvas.bind("<Configure>", lambda _e: self.refresh_preview())
-            self.info_var = tk.StringVar(value="Paste a 7TV link above and press Load.")
-            ttk.Label(mid, textvariable=self.info_var, style="Muted.TLabel", wraplength=440).grid(
-                row=2, column=0, sticky="w", pady=(6, 0))
-
-            ttk.Label(mid, text="PASTE THIS IN DISCORD", style="Sec.TLabel").grid(row=3, column=0, sticky="w", pady=(10, 4))
-            prow = ttk.Frame(mid, style="Panel.TFrame")
-            prow.grid(row=4, column=0, sticky="ew")
-            prow.columnconfigure(0, weight=1)
-            self.paste_txt = tk.Text(prow, height=3, bg=FIELD, fg=FG, insertbackground=FG,
-                                     borderwidth=0, highlightthickness=0, font=("Consolas", 10), wrap="none")
-            self.paste_txt.grid(row=0, column=0, sticky="ew")
-            ttk.Button(prow, text="Copy", command=self.on_copy).grid(row=0, column=1, padx=(8, 0), sticky="n")
-
-            # right: options
-            right = ttk.Frame(main, style="Panel.TFrame", padding=12)
-            right.grid(row=0, column=2, sticky="ns")
-            rr = 0
-
-            def sec(text):
-                nonlocal rr
-                ttk.Label(right, text=text, style="Sec.TLabel").grid(row=rr, column=0, columnspan=4,
-                                                                     sticky="w", pady=(10 if rr else 0, 4))
-                rr += 1
-
-            sec("EMOTE NAME")
+            nrow = ctk.CTkFrame(prev, fg_color="transparent")
+            nrow.grid(row=2, column=0, sticky="ew", padx=18, pady=16)
+            nrow.grid_columnconfigure(1, weight=1)
+            self.label(nrow, "Name", 13, "muted").grid(row=0, column=0, padx=(0, 12))
             self.name_var = tk.StringVar()
-            ttk.Entry(right, textvariable=self.name_var, width=26).grid(row=rr, column=0, columnspan=4, sticky="ew")
-            rr += 1
+            self.name_entry = ctk.CTkEntry(nrow, textvariable=self.name_var, height=38, corner_radius=10,
+                                           border_width=1, border_color=C["border"], fg_color=C["field"],
+                                           text_color=C["text"], font=self.F(14))
+            self.name_entry.grid(row=0, column=1, sticky="ew")
             self.name_var.trace_add("write", self.on_name_change)
 
-            sec("CUT INTO PIECES")
-            self.split_var = tk.StringVar(value=self.cfg.get("split", "auto"))
-            for val, lbl in (("none", "Don't cut (one emote)"),
-                             ("auto", "Auto - cut wide emotes"),
-                             ("custom", "Custom grid")):
-                ttk.Radiobutton(right, text=lbl, value=val, variable=self.split_var,
-                                command=self.refresh_preview).grid(row=rr, column=0, columnspan=4, sticky="w")
-                rr += 1
-            g = ttk.Frame(right, style="Panel.TFrame")
-            g.grid(row=rr, column=0, columnspan=4, sticky="w", padx=(22, 0), pady=(2, 0))
-            rr += 1
-            self.cols_var = tk.StringVar(value=str(self.cfg.get("cols", 2)))
-            self.rows_var = tk.StringVar(value=str(self.cfg.get("rows", 2)))
-            ttk.Spinbox(g, from_=1, to=MAX_GRID, width=4, textvariable=self.cols_var,
-                        command=self._custom_touched).pack(side="left")
-            ttk.Label(g, text=" wide  ×", style="Panel.TLabel").pack(side="left")
-            ttk.Spinbox(g, from_=1, to=MAX_GRID, width=4, textvariable=self.rows_var,
-                        command=self._custom_touched).pack(side="left", padx=(6, 0))
-            ttk.Label(g, text=" tall", style="Panel.TLabel").pack(side="left")
-            for v in (self.cols_var, self.rows_var):
-                v.trace_add("write", lambda *_: self.refresh_preview())
+            # controls
+            ctl = self.card(body, width=320)
+            ctl.grid(row=0, column=2, sticky="ns", padx=(14, 0))
+            ctl.grid_propagate(False)
+            ctl.grid_columnconfigure(0, weight=1)
+            pad = dict(padx=18, sticky="ew")
 
-            sec("FIT")
-            inv = {v: k for k, v in FIT_LABELS.items()}
-            self.fit_var = tk.StringVar(value=inv.get(self.cfg.get("fit", "contain"), "Fit inside (pad)"))
-            cb = ttk.Combobox(right, textvariable=self.fit_var, values=list(FIT_LABELS), state="readonly", width=24)
-            cb.grid(row=rr, column=0, columnspan=4, sticky="ew")
-            cb.bind("<<ComboboxSelected>>", lambda _e: self.refresh_preview())
-            rr += 1
+            self.section(ctl, "Cut into pieces").grid(row=0, column=0, pady=(16, 8), **pad)
+            self.mode_seg = self.segmented(ctl, list(MODES), lambda _v: self.on_mode())
+            self.mode_seg.grid(row=1, column=0, **pad)
+            self.mode_help = self.label(ctl, "", 12, "muted", anchor="w", justify="left", wraplength=270)
+            self.mode_help.grid(row=2, column=0, pady=(6, 0), **pad)
+            self.grid_box = ctk.CTkFrame(ctl, fg_color="transparent")
+            self.cols_var = tk.IntVar(value=int(self.cfg["cols"]))
+            self.rows_var = tk.IntVar(value=int(self.cfg["rows"]))
+            self._stepper(self.grid_box, "Wide", self.cols_var).pack(side="left")
+            self._stepper(self.grid_box, "Tall", self.rows_var).pack(side="left", padx=(14, 0))
 
-            sec("PIECE SIZE (px)")
-            self.tile_var = tk.StringVar(value=str(self.cfg.get("tile", 128)))
-            ttk.Combobox(right, textvariable=self.tile_var, values=["128", "112", "96", "64"],
-                         width=8).grid(row=rr, column=0, sticky="w")
-            ttk.Label(right, text="128 = Discord's size", style="Muted.TLabel").grid(row=rr, column=1, columnspan=3, sticky="w", padx=6)
-            rr += 1
+            self.section(ctl, "Fit").grid(row=4, column=0, pady=(18, 8), **pad)
+            self.fit_seg = self.segmented(ctl, list(FITS), lambda _v: self.on_option())
+            self.fit_seg.grid(row=5, column=0, **pad)
 
-            sec("SAVE TO")
-            self.out_var = tk.StringVar(value=self.cfg.get("out_dir") or default_out_dir())
-            of = ttk.Frame(right, style="Panel.TFrame")
-            of.grid(row=rr, column=0, columnspan=4, sticky="ew")
-            of.columnconfigure(0, weight=1)
-            ttk.Entry(of, textvariable=self.out_var, width=20).grid(row=0, column=0, sticky="ew")
-            ttk.Button(of, text="…", width=3, command=self.on_pick_dir).grid(row=0, column=1, padx=(6, 0))
-            rr += 1
-            self.orig_var = tk.BooleanVar(value=self.cfg.get("keep_original", False))
-            ttk.Checkbutton(right, text="Also keep the original file", variable=self.orig_var).grid(
-                row=rr, column=0, columnspan=4, sticky="w", pady=(6, 0))
-            rr += 1
+            self.save_btn = self.button(ctl, "Save for Discord", lambda: self.on_save(False), "accent",
+                                        height=48, corner_radius=12, font=self.F(15, True))
+            self.save_btn.grid(row=6, column=0, pady=(22, 0), **pad)
+            self.save_all_btn = self.button(ctl, "Save all", lambda: self.on_save(True), "ghost", height=38)
 
-            self.save_btn = ttk.Button(right, text="Save for Discord", style="Accent.TButton",
-                                       command=lambda: self.on_save(False))
-            self.save_btn.grid(row=rr, column=0, columnspan=4, sticky="ew", pady=(16, 0))
-            rr += 1
-            self.save_all_btn = ttk.Button(right, text="Save ALL in list", command=lambda: self.on_save(True))
-            self.save_all_btn.grid(row=rr, column=0, columnspan=4, sticky="ew", pady=(6, 0))
-            rr += 1
-            ttk.Button(right, text="Open output folder", command=self.on_open_out).grid(
-                row=rr, column=0, columnspan=4, sticky="ew", pady=(6, 0))
-            rr += 1
-            self.auto_upd_var = tk.BooleanVar(value=self.cfg.get("auto_update", True))
-            ttk.Checkbutton(right, text="Check for updates on start", variable=self.auto_upd_var,
-                            command=self.remember).grid(row=rr, column=0, columnspan=4, sticky="w", pady=(10, 0))
-            rr += 1
+            self.section(ctl, "Paste in Discord").grid(row=8, column=0, pady=(20, 8), **pad)
+            self.paste_box = ctk.CTkTextbox(ctl, height=76, corner_radius=10, border_width=1,
+                                            border_color=C["border"], fg_color=C["field"],
+                                            text_color=C["text"], font=(MONO, 12), wrap="char")
+            self.paste_box.grid(row=9, column=0, **pad)
+            brow = ctk.CTkFrame(ctl, fg_color="transparent")
+            brow.grid(row=10, column=0, pady=(8, 16), **pad)
+            brow.grid_columnconfigure((0, 1), weight=1)
+            self.button(brow, "Copy", self.on_copy, "blue").grid(row=0, column=0, sticky="ew", padx=(0, 4))
+            self.button(brow, "Open folder", self.on_open_out, "ghost").grid(row=0, column=1, sticky="ew", padx=(4, 0))
+            ctl.grid_rowconfigure(11, weight=1)
 
-            # log
-            self.log_txt = tk.Text(outer, height=5, bg=PANEL, fg=MUTED, borderwidth=0, highlightthickness=0,
-                                   font=("Consolas", 9), state="disabled", wrap="word")
-            self.log_txt.grid(row=4, column=0, sticky="ew")
-            self.log_txt.tag_config("ok", foreground=GOOD)
-            self.log_txt.tag_config("err", foreground=BAD)
-            self.log_txt.tag_config("fg", foreground=FG)
+            # ---- status bar
+            sb = ctk.CTkFrame(r, fg_color="transparent")
+            sb.grid(row=3, column=0, sticky="ew", padx=24, pady=(10, 14))
+            sb.grid_columnconfigure(1, weight=1)
+            self.dot = self.label(sb, "●", 12, "faint")
+            self.dot.grid(row=0, column=0, padx=(0, 8))
+            self.status = self.label(sb, "Ready. Paste a 7TV link and press Load.", 12, "muted", anchor="w")
+            self.status.grid(row=0, column=1, sticky="ew")
+            self.progress = ctk.CTkProgressBar(sb, width=140, height=6, corner_radius=3, mode="indeterminate",
+                                               progress_color=C["accent"], fg_color=C["card_hi"])
+            self.button(sb, "Log", self.show_log, "flat", width=54, height=26, font=self.F(12)).grid(row=0, column=3)
+
+            # initial values
+            inv_m = {v: k for k, v in MODES.items()}
+            inv_f = {v: k for k, v in FITS.items()}
+            self.mode_seg.set(inv_m.get(self.cfg["mode"], "Auto"))
+            self.fit_seg.set(inv_f.get(self.cfg["fit"], "Pad"))
+            self._show_sidebar(False)
+            self.on_mode(save=False)
             self._set_buttons()
+            self.refresh_preview()
 
-        # ---------- helpers ----------
-        def log(self, msg, tag=None):
-            self.log_txt.config(state="normal")
-            self.log_txt.insert("end", msg + "\n", tag or ())
-            self.log_txt.see("end")
-            self.log_txt.config(state="disabled")
+        def _stepper(self, parent, text, var):
+            f = ctk.CTkFrame(parent, fg_color="transparent")
+            self.label(f, text, 12, "muted").pack(side="left", padx=(0, 6))
 
+            def bump(d):
+                var.set(max(1, min(MAX_GRID, var.get() + d)))
+                self.on_option()
+            box = ctk.CTkFrame(f, fg_color=C["field"], corner_radius=10)
+            box.pack(side="left")
+            ctk.CTkButton(box, text="−", width=30, height=30, corner_radius=8, fg_color="transparent",
+                          hover_color=C["card_hi"], text_color=C["text"], font=self.F(15),
+                          command=lambda: bump(-1)).pack(side="left", padx=2, pady=2)
+            ctk.CTkLabel(box, textvariable=var, width=26, font=self.F(14, True), text_color=C["text"]).pack(side="left")
+            ctk.CTkButton(box, text="+", width=30, height=30, corner_radius=8, fg_color="transparent",
+                          hover_color=C["card_hi"], text_color=C["text"], font=self.F(15),
+                          command=lambda: bump(1)).pack(side="left", padx=2, pady=2)
+            return f
+
+        def _show_sidebar(self, show):
+            if show:
+                self.side.grid(row=0, column=0, sticky="ns", padx=(0, 14))
+            else:
+                self.side.grid_forget()
+
+        # ================= plumbing =================
         def _poll(self):
             try:
                 while True:
-                    fn = self.q.get_nowait()
-                    fn()
+                    self.q.get_nowait()()
             except queue.Empty:
                 pass
             self.root.after(40, self._poll)
@@ -782,65 +974,78 @@ def run_gui():
         def ui(self, fn):
             self.q.put(fn)
 
+        def say(self, msg, kind="info"):
+            colors = {"info": "muted", "ok": "good", "err": "bad", "warn": "warn", "busy": "accent"}
+            self.status.configure(text=msg, text_color=C["text"] if kind in ("ok", "err", "warn") else C["muted"])
+            self.dot.configure(text_color=C[colors.get(kind, "muted")])
+            self.log_lines.append(time.strftime("%H:%M:%S  ") + msg)
+
         def work(self, fn, done=None, label=None):
             if self.busy:
-                return
+                return False
             self.busy = True
             self._set_buttons()
+            self.progress.grid(row=0, column=2, padx=(10, 12))
+            self.progress.start()
             if label:
-                self.log(label)
+                self.say(label, "busy")
 
             def run():
                 try:
                     res = fn()
-                    self.ui(lambda: done(res) if done else None)
                 except Exception as e:  # noqa
                     msg = str(e) or e.__class__.__name__
-                    self.ui(lambda: self.log("✖ " + msg, "err"))
-                finally:
                     self.ui(self._unbusy)
+                    self.ui(lambda: self.say(msg, "err"))
+                    return
+                self.ui(self._unbusy)  # first, so `done` may start the next job
+                if done:
+                    self.ui(lambda: done(res))
             threading.Thread(target=run, daemon=True).start()
+            return True
 
         def _unbusy(self):
             self.busy = False
+            self.progress.stop()
+            self.progress.grid_forget()
             self._set_buttons()
 
         def _set_buttons(self):
-            st = "disabled" if self.busy else "normal"
-            self.load_btn.config(state=st)
-            self.save_btn.config(state="disabled" if self.busy or self.current is None else "normal")
-            self.save_all_btn.config(state="disabled" if self.busy or len(self.items) < 2 else "normal")
-
-        def _custom_touched(self):
-            self.split_var.set("custom")
-            self.refresh_preview()
+            self.load_btn.configure(state="disabled" if self.busy else "normal")
+            self.save_btn.configure(state="disabled" if self.busy or self.current is None else "normal")
+            self.save_all_btn.configure(state="disabled" if self.busy else "normal")
 
         def settings(self):
-            try:
-                tile = max(16, min(512, int(self.tile_var.get())))
-            except ValueError:
-                tile = 128
-            try:
-                cols = int(self.cols_var.get())
-                rows = int(self.rows_var.get())
-            except ValueError:
-                cols, rows = 1, 1
-            return dict(mode=self.split_var.get(), cols=cols, rows=rows, tile=tile,
-                        fit=FIT_LABELS.get(self.fit_var.get(), "contain"))
+            return dict(mode=MODES.get(self.mode_seg.get(), "auto"), cols=self.cols_var.get(),
+                        rows=self.rows_var.get(), tile=int(self.cfg["tile"]),
+                        fit=FITS.get(self.fit_seg.get(), "contain"))
 
         def remember(self):
             s = self.settings()
-            self.cfg.update(split=s["mode"], cols=s["cols"], rows=s["rows"], tile=s["tile"], fit=s["fit"],
-                            out_dir=self.out_var.get(), keep_original=bool(self.orig_var.get()),
-                            auto_update=bool(self.auto_upd_var.get()))
+            self.cfg.update(mode=s["mode"], cols=s["cols"], rows=s["rows"], fit=s["fit"])
             save_config(self.cfg)
 
-        # ---------- loading ----------
+        # ================= options =================
+        def on_mode(self, save=True):
+            mode = MODES.get(self.mode_seg.get(), "auto")
+            self.mode_help.configure(text=MODE_HELP[mode])
+            if mode == "custom":
+                self.grid_box.grid(row=3, column=0, padx=18, pady=(10, 0), sticky="w")
+            else:
+                self.grid_box.grid_forget()
+            if save:
+                self.on_option()
+
+        def on_option(self):
+            self.remember()
+            self.refresh_preview()
+
+        # ================= loading =================
         def on_load(self):
             try:
-                kind, val = parse_input(self.url_var.get())
+                kind, val = parse_input(self.url_entry.get())
             except ValueError as e:
-                self.log("✖ " + str(e), "err")
+                self.say(str(e), "err")
                 return
             if kind == "file":
                 self._load_file(val)
@@ -849,48 +1054,76 @@ def run_gui():
             def job():
                 if kind == "emote":
                     ref = fetch_emote(val)
-                    return ref.name, [ref]
-                if kind == "set":
-                    return fetch_set(val)
-                return fetch_user_set(val)
+                    return None, [ref]
+                return fetch_set(val) if kind == "set" else fetch_user_set(val)
 
             def done(res):
                 title, refs = res
                 if not refs:
-                    self.log("That set is empty.", "err")
+                    self.say("That emote set is empty.", "warn")
                     return
-                self.set_items(title, [dict(name=r.name, ref=r, path=None, frames=None, raw=None) for r in refs])
+                self.set_items(title, [dict(name=x.name, ref=x, path=None, frames=None, raw=None) for x in refs])
                 if len(refs) > 1:
-                    self.log(f"✔ Loaded set “{title}” with {len(refs)} emotes. Click one to preview, "
-                             f"or use “Save ALL in list”.", "ok")
-            self.work(job, done, label="Looking up on 7TV…")
+                    self.say(f"Loaded “{title}” with {len(refs)} emotes. Pick one to preview, or Save all.", "ok")
+            self.work(job, done, "Looking it up on 7TV…")
 
         def on_open_file(self):
-            p = filedialog.askopenfilename(title="Pick an image",
-                                           filetypes=[("Images", "*.gif *.png *.webp *.jpg *.jpeg *.avif"),
-                                                      ("All files", "*.*")])
+            p = filedialog.askopenfilename(title="Pick an image", filetypes=[
+                ("Images", "*.gif *.png *.webp *.jpg *.jpeg *.avif"), ("All files", "*.*")])
             if p:
-                self.url_var.set(p)
+                self.url_entry.delete(0, "end")
+                self.url_entry.insert(0, p)
                 self._load_file(p)
 
         def _load_file(self, path):
             name = Path(path).stem
-            self.set_items(name, [dict(name=name, ref=None, path=path, frames=None, raw=None)])
+            self.set_items(None, [dict(name=name, ref=None, path=path, frames=None, raw=None)])
 
         def set_items(self, title, items):
             self.items = items
             self.set_title = title if len(items) > 1 else None
-            self.listbox.delete(0, "end")
-            for it in items:
-                self.listbox.insert("end", it["name"])
-            self.list_title.config(text=f"EMOTES ({len(items)})" if len(items) > 1 else "EMOTE")
-            self.listbox.selection_clear(0, "end")
-            self.listbox.selection_set(0)
+            for w in self.list_frame.winfo_children():
+                w.destroy()
+            self.rows = []
+            multi = len(items) > 1
+            self._show_sidebar(multi)
+            if multi:
+                self.side_title.configure(text=f"IN THIS SET · {len(items)}")
+                for i, it in enumerate(items):
+                    self._add_row(i, it)
+                self.save_all_btn.grid(row=7, column=0, padx=18, pady=(8, 0), sticky="ew")
+                self.all_var.set(False)
+                self._update_save_all()
+            else:
+                self.save_all_btn.grid_forget()
             self.select_item(0)
-            self._set_buttons()
+
+        def _add_row(self, i, it):
+            row = ctk.CTkFrame(self.list_frame, fg_color="transparent", corner_radius=8)
+            row.pack(fill="x", pady=1)
+            var = tk.BooleanVar(value=False)
+            ctk.CTkCheckBox(row, text="", variable=var, width=22, checkbox_width=18, checkbox_height=18,
+                            corner_radius=5, fg_color=C["accent"], hover_color=C["accent_hover"],
+                            border_color=C["faint"], command=self._update_save_all).pack(side="left", padx=(6, 2))
+            btn = ctk.CTkButton(row, text=it["name"], anchor="w", height=30, corner_radius=8,
+                                fg_color="transparent", hover_color=C["card_hi"], text_color=C["text"],
+                                font=self.F(13), command=lambda i=i: self.select_item(i))
+            btn.pack(side="left", fill="x", expand=True)
+            self.rows.append((row, var, btn))
+
+        def on_check_all(self):
+            for _, var, _ in self.rows:
+                var.set(self.all_var.get())
+            self._update_save_all()
+
+        def _checked(self):
+            return [self.items[i] for i, (_, var, _) in enumerate(self.rows) if var.get()]
+
+        def _update_save_all(self):
+            k = len(self._checked())
+            self.save_all_btn.configure(text=f"Save selected ({k})" if k else f"Save all ({len(self.items)})")
 
         def ensure_loaded(self, it):
-            """Runs in a worker thread."""
             if it["frames"] is None:
                 if it["path"]:
                     raw = Path(it["path"]).read_bytes()
@@ -901,22 +1134,18 @@ def run_gui():
                 it["frames"] = load_frames(raw)
             return it
 
-        def on_select(self, _e=None):
-            sel = self.listbox.curselection()
-            if sel:
-                self.select_item(sel[-1])
-
         def select_item(self, idx):
             it = self.items[idx]
-            self.current = None
-            self._set_buttons()
+            for j, (_, _, btn) in enumerate(self.rows):
+                btn.configure(fg_color=C["card_hi"] if j == idx else "transparent")
             if it["frames"] is not None:
                 self._show(it)
                 return
-
-            def done(item):
-                self._show(item)
-            self.work(lambda: self.ensure_loaded(it), done, label=f"{'Downloading' if it['ref'] else 'Opening'} {it['name']}…")
+            self.current = None
+            self._set_buttons()
+            if not self.work(lambda: self.ensure_loaded(it), self._show,
+                             f"{'Downloading' if it['ref'] else 'Opening'} {it['name']}…"):
+                self.say("Busy, try again in a second.", "warn")
 
         def _show(self, it):
             self.current = it
@@ -924,140 +1153,286 @@ def run_gui():
             self.name_var.set(it["name"])
             self._name_lock = False
             self._set_buttons()
+            n = len(it["frames"])
+            w, h = it["frames"][0][0].size
+            self.say(f"{it['name']} loaded · {w}×{h}px · {'animated, %d frames' % n if n > 1 else 'static'}", "ok")
             self.refresh_preview()
 
         def on_name_change(self, *_):
             if getattr(self, "_name_lock", False) or self.current is None:
                 return
             self.current["name"] = self.name_var.get()
-            self.update_info()
+            for (_, _, btn), it in zip(self.rows, self.items):
+                if it is self.current:
+                    btn.configure(text=it["name"])
+            self.update_texts()
 
-        # ---------- preview ----------
+        # ================= preview =================
         def refresh_preview(self):
+            if not hasattr(self, "fit_seg"):
+                return
             if self.anim_job:
                 self.root.after_cancel(self.anim_job)
                 self.anim_job = None
-            self.canvas.delete("all")
+            cv = self.canvas
+            cv.delete("all")
+            cw, ch = max(60, cv.winfo_width()), max(60, cv.winfo_height())
             it = self.current
             if it is None or it["frames"] is None:
+                cv.create_text(cw // 2, ch // 2 - 12, text="Nothing loaded yet", fill=C["text"],
+                               font=(FAMILY, 15, "bold"))
+                cv.create_text(cw // 2, ch // 2 + 16, text="Paste a 7TV link above, or open a GIF / PNG / WebP",
+                               fill=C["muted"], font=(FAMILY, 11))
+                self.info_lbl.configure(text="")
+                self.update_texts()
                 return
             s = self.settings()
             frames = it["frames"]
             w, h = frames[0][0].size
             cols, rows = plan_grid(w, h, s["mode"], s["cols"], s["rows"])
-            cw = max(50, self.canvas.winfo_width())
-            ch = max(50, self.canvas.winfo_height())
-            pt = max(8, min(s["tile"], (cw - 20) // cols, (ch - 20) // rows))
-            preview_frames = frames[:300]
-            comp = compose(preview_frames, cols, rows, pt, s["fit"])
+            pt = max(8, min(s["tile"] * 2, (cw - 40) // cols, (ch - 40) // rows))
+            comp = compose(frames[:300], cols, rows, pt, s["fit"])
             self.anim_imgs = [(ImageTk.PhotoImage(f), d) for f, d in comp]
-            self.update_info()
             W, H = cols * pt, rows * pt
             x0, y0 = (cw - W) // 2, (ch - H) // 2
-            self.canvas.create_rectangle(x0, y0, x0 + W, y0 + H, outline="#3f4147")
-            self.img_id = self.canvas.create_image(x0, y0, anchor="nw", image=self.anim_imgs[0][0])
-            for c in range(1, cols):
-                self.canvas.create_line(x0 + c * pt, y0, x0 + c * pt, y0 + H, fill=ACCENT, dash=(4, 3))
-            for r_ in range(1, rows):
-                self.canvas.create_line(x0, y0 + r_ * pt, x0 + W, y0 + r_ * pt, fill=ACCENT, dash=(4, 3))
-
+            self.img_id = cv.create_image(x0, y0, anchor="nw", image=self.anim_imgs[0][0])
+            n = cols * rows
+            if n > 1:
+                for c in range(1, cols):
+                    cv.create_line(x0 + c * pt, y0, x0 + c * pt, y0 + H, fill=C["accent"], dash=(5, 4), width=2)
+                for rr in range(1, rows):
+                    cv.create_line(x0, y0 + rr * pt, x0 + W, y0 + rr * pt, fill=C["accent"], dash=(5, 4), width=2)
+                for i in range(n):
+                    tx, ty = x0 + (i % cols) * pt + 6, y0 + (i // cols) * pt + 6
+                    cv.create_rectangle(tx, ty, tx + 20, ty + 18, fill=C["accent"], outline="")
+                    cv.create_text(tx + 10, ty + 9, text=str(i + 1), fill="white", font=(FAMILY, 9, "bold"))
+            cv.create_rectangle(x0 - 1, y0 - 1, x0 + W, y0 + H, outline="#4a4d57")
+            fmt = "GIF" if len(frames) > 1 else "PNG"
+            self.info_lbl.configure(text=f"{'1 emote' if n == 1 else f'{n} pieces · {cols}×{rows}'} · {s['tile']}px {fmt}")
+            self.update_texts()
             if len(self.anim_imgs) > 1:
                 self._animate(0)
 
-        def update_info(self):
-            it = self.current
-            if it is None or it["frames"] is None:
-                return
-            s = self.settings()
-            frames = it["frames"]
-            w, h = frames[0][0].size
-            cols, rows = plan_grid(w, h, s["mode"], s["cols"], s["rows"])
-            n = cols * rows
-            kind = f"animated, {len(frames)} frames" if len(frames) > 1 else "static"
-            out = "1 emote" if n == 1 else f"{n} pieces ({cols} wide × {rows} tall)"
-            self.info_var.set(f"{it['name']}  ·  {w}×{h}px, {kind}  →  {out} of {s['tile']}px "
-                              f"({'GIF' if len(frames) > 1 else 'PNG'})")
-            base = sanitize_name(it["name"], len(str(n)) if n > 1 else 0)
-            names = [base] if n == 1 else [f"{base}{i}" for i in range(1, n + 1)]
-            paste = "\n".join("".join(f":{names[r_ * cols + c]}:" for c in range(cols)) for r_ in range(rows))
-            self.paste_txt.delete("1.0", "end")
-            self.paste_txt.insert("1.0", paste)
-
         def _animate(self, i):
             img, d = self.anim_imgs[i]
-            self.canvas.itemconfig(self.img_id, image=img)
+            self.canvas.itemconfigure(self.img_id, image=img)
             self.anim_job = self.root.after(d, self._animate, (i + 1) % len(self.anim_imgs))
 
-        # ---------- saving ----------
-        def on_save(self, all_items):
-            if all_items:
-                sel = list(self.listbox.curselection())
-                targets = [self.items[i] for i in sel] if len(sel) > 1 else list(self.items)
-            else:
-                if self.current is None:
-                    return
+        def update_texts(self):
+            if not hasattr(self, "paste_box"):
+                return
+            self.paste_box.configure(state="normal")
+            self.paste_box.delete("1.0", "end")
+            it = self.current
+            if it is not None and it["frames"] is not None:
+                s = self.settings()
+                w, h = it["frames"][0][0].size
+                cols, rows = plan_grid(w, h, s["mode"], s["cols"], s["rows"])
+                self.paste_box.insert("1.0", paste_text(it["name"], cols, rows))
+            self.paste_box.configure(state="disabled")
+
+        # ================= saving =================
+        def out_dir(self):
+            return Path(self.cfg.get("out_dir") or default_out_dir())
+
+        def on_save(self, batch):
+            if batch:
+                targets = self._checked() or list(self.items)
+            elif self.current is not None:
                 targets = [self.current]
-            out = Path(self.out_var.get().strip() or default_out_dir())
-            if getattr(self, "set_title", None):
+            else:
+                return
+            out = self.out_dir()
+            if self.set_title and batch:
                 out = out / folder_name(self.set_title)
             s = self.settings()
-            keep = bool(self.orig_var.get())
+            keep = bool(self.cfg.get("keep_original"))
             self.remember()
 
             def job():
                 results = []
                 for i, it in enumerate(targets, 1):
+                    if len(targets) > 1:
+                        self.ui(lambda i=i, it=it: self.say(f"Saving {i}/{len(targets)}: {it['name']}…", "busy"))
                     try:
                         self.ensure_loaded(it)
                         res = make_emote(it["frames"], it["name"], out, s["mode"], s["cols"], s["rows"],
                                          s["tile"], s["fit"], it["raw"] if keep else None)
-                        results.append((it, res, None))
-                        self.ui(lambda it=it, res=res, i=i: self._report(it, res, i, len(targets)))
+                        results.append((it, res))
+                        self.log_lines.append(f"  ✔ {it['name']}: {len(res['files'])} file(s), {res['note']}")
                     except Exception as e:  # noqa
-                        results.append((it, None, e))
-                        self.ui(lambda it=it, e=e: self.log(f"✖ {it['name']}: {e}", "err"))
+                        results.append((it, None))
+                        self.log_lines.append(f"  ✖ {it['name']}: {e}")
                 return results
 
             def done(results):
-                ok = sum(1 for _, r, _ in results if r)
-                if len(results) > 1:
-                    self.log(f"Done: {ok}/{len(results)} emotes saved to {out}", "ok")
-                if len(results) == 1 and results[0][1]:
-                    res = results[0][1]
-                    self.paste_txt.delete("1.0", "end")
-                    self.paste_txt.insert("1.0", res["paste"])
-            self.work(job, done, label=f"Processing {len(targets)} emote(s)…")
-
-        def _report(self, it, res, i, total):
-            files = res["files"]
-            big = max(sz for _, sz in files)
-            prefix = f"[{i}/{total}] " if total > 1 else ""
-            warn = "WARNING" in res["note"]
-            what = files[0][0].name if len(files) == 1 else f"{len(files)} pieces in {res['folder'].name}\\"
-            self.log(f"{'⚠' if warn else '✔'} {prefix}{it['name']} → {what}  "
-                     f"(largest {big / 1024:.0f} KB, {res['note']})", "err" if warn else "ok")
+                ok = [r for _, r in results if r]
+                failed = len(results) - len(ok)
+                self.last_out = out
+                if len(results) == 1 and ok:
+                    res = ok[0]
+                    big = max(sz for _, sz in res["files"])
+                    what = f"{len(res['files'])} pieces" if len(res["files"]) > 1 else res["files"][0][0].name
+                    warn = "WARNING" in res["note"]
+                    self.say(f"Saved {what} · largest {big / 1024:.0f} KB · {res['note']}", "warn" if warn else "ok")
+                elif ok:
+                    self.say(f"Saved {len(ok)} emotes to {out}" + (f" · {failed} failed (see Log)" if failed else ""),
+                             "warn" if failed else "ok")
+                else:
+                    self.say("Nothing was saved. See Log for details.", "err")
+            self.work(job, done, f"Saving {len(targets)} emote{'s' if len(targets) > 1 else ''}…")
 
         def on_copy(self):
-            txt = self.paste_txt.get("1.0", "end").strip()
+            txt = self.paste_box.get("1.0", "end").strip()
             if txt:
                 self.root.clipboard_clear()
                 self.root.clipboard_append(txt)
-                self.log("Copied to clipboard. Upload the pieces to your server first, then paste.", "fg")
-
-        def on_pick_dir(self):
-            d = filedialog.askdirectory(initialdir=self.out_var.get() or str(Path.home()))
-            if d:
-                self.out_var.set(d)
-                self.remember()
+                self.say("Copied! Upload the pieces to your server first, then paste.", "ok")
 
         def on_open_out(self):
-            p = Path(self.out_var.get().strip() or default_out_dir())
+            p = getattr(self, "last_out", None) or self.out_dir()
             p.mkdir(parents=True, exist_ok=True)
             open_folder(p)
 
-        # ---------- updates ----------
+        # ================= dialogs =================
+        def dialog(self, title, w=520, h=440):
+            top = ctk.CTkToplevel(self.root)
+            top.title(title)
+            top.configure(fg_color=C["bg"])
+            top.resizable(False, False)
+            self.root.update_idletasks()
+            x = self.root.winfo_rootx() + (self.root.winfo_width() - w) // 2
+            y = self.root.winfo_rooty() + (self.root.winfo_height() - h) // 3
+            top.geometry(f"{w}x{h}+{max(0, x)}+{max(0, y)}")
+            top.transient(self.root)
+            set_icon(top)
+            top.after(150, top.lift)
+
+            def grab():
+                try:
+                    top.grab_set()
+                except Exception:
+                    pass
+            top.after(200, grab)
+            top.grid_columnconfigure(0, weight=1)
+            return top
+
+        def text_dialog(self, title, heading, sub, text, buttons):
+            top = self.dialog(title, 560, 480)
+            top.grid_rowconfigure(2, weight=1)
+            self.label(top, heading, 18, bold=True, anchor="w").grid(row=0, column=0, sticky="ew", padx=24, pady=(22, 2))
+            self.label(top, sub, 12, "muted", anchor="w").grid(row=1, column=0, sticky="ew", padx=24, pady=(0, 12))
+            box = ctk.CTkTextbox(top, corner_radius=12, border_width=1, border_color=C["border"],
+                                 fg_color=C["card"], text_color=C["text"], font=self.F(13), wrap="word")
+            box.grid(row=2, column=0, sticky="nsew", padx=24)
+            box.insert("1.0", text)
+            box.configure(state="disabled")
+            row = ctk.CTkFrame(top, fg_color="transparent")
+            row.grid(row=3, column=0, sticky="e", padx=24, pady=18)
+            for label, kind, cmd in buttons:
+                self.button(row, label, lambda c=cmd: (top.destroy(), c and c()), kind, width=120).pack(side="left", padx=(8, 0))
+            return top
+
+        def show_log(self):
+            self.text_dialog("Log", "Activity log", "Everything that happened since the app started.",
+                             "\n".join(self.log_lines[-400:]) or "Nothing yet.", [("Close", "ghost", None)])
+
+        def show_changelog(self, after=None):
+            def job():
+                return get_changelog(after=after, upto=__version__)
+
+            def done(entries):
+                head = f"What's new in v{__version__}" if after else "Changelog"
+                sub = (f"You were updated from v{after}." if after else
+                       f"You're on v{__version__} ({KIND_LABEL[install_kind()]}).")
+                self.text_dialog("What's new", head, sub, format_changelog(entries), [("Got it", "accent", None)])
+            threading.Thread(target=lambda: self.ui(lambda e=job(): done(e)), daemon=True).start()
+
+        def open_settings(self):
+            top = self.dialog("Settings", 520, 600)
+            f = ctk.CTkFrame(top, fg_color="transparent")
+            f.grid(row=0, column=0, sticky="nsew", padx=24, pady=20)
+            f.grid_columnconfigure(0, weight=1)
+            self.label(f, "Settings", 18, bold=True, anchor="w").grid(row=0, column=0, sticky="ew", pady=(0, 14))
+
+            self.section(f, "Save emotes to").grid(row=1, column=0, sticky="ew", pady=(0, 6))
+            dr = ctk.CTkFrame(f, fg_color="transparent")
+            dr.grid(row=2, column=0, sticky="ew")
+            dr.grid_columnconfigure(0, weight=1)
+            dir_var = tk.StringVar(value=str(self.out_dir()))
+            ctk.CTkEntry(dr, textvariable=dir_var, height=36, corner_radius=10, border_width=1,
+                         border_color=C["border"], fg_color=C["field"], text_color=C["text"],
+                         font=self.F(12)).grid(row=0, column=0, sticky="ew")
+
+            def browse():
+                d = filedialog.askdirectory(parent=top, initialdir=dir_var.get() or str(Path.home()))
+                if d:
+                    dir_var.set(d)
+            self.button(dr, "Browse", browse, "ghost", width=90).grid(row=0, column=1, padx=(8, 0))
+
+            self.section(f, "Piece size").grid(row=3, column=0, sticky="ew", pady=(18, 6))
+            size_seg = self.segmented(f, ["128 px", "96 px", "64 px"], None)
+            size_seg.set(f"{self.cfg['tile']} px" if self.cfg["tile"] in (128, 96, 64) else "128 px")
+            size_seg.grid(row=4, column=0, sticky="w")
+            self.label(f, "128 px is Discord's emoji size.", 11, "faint", anchor="w").grid(row=5, column=0, sticky="ew", pady=(4, 0))
+
+            def switch(row, text, key):
+                var = tk.BooleanVar(value=bool(self.cfg.get(key)))
+                ctk.CTkSwitch(f, text=text, variable=var, onvalue=True, offvalue=False, font=self.F(13),
+                              progress_color=C["accent"], button_color=C["text"], button_hover_color="white",
+                              fg_color=C["card_hi"], text_color=C["text"]).grid(row=row, column=0, sticky="w", pady=(12, 0))
+                return var
+            self.section(f, "Options").grid(row=6, column=0, sticky="ew", pady=(18, 0))
+            keep_v = switch(7, "Also keep the original file", "keep_original")
+            chk_v = switch(8, "Check for updates when the app starts", "check_updates")
+            auto_v = switch(9, "Install updates automatically", "auto_install")
+
+            info = ctk.CTkFrame(f, fg_color=C["card"], corner_radius=12)
+            info.grid(row=10, column=0, sticky="ew", pady=(20, 0))
+            self.label(info, f"Version {__version__} · {KIND_LABEL[install_kind()]}", 12, "muted").pack(side="left", padx=14, pady=10)
+            self.button(info, "GitHub page", lambda: __import__("webbrowser").open(f"https://github.com/{GITHUB_REPO}"),
+                        "flat", width=100, height=30).pack(side="right", padx=8)
+
+            def save_close():
+                self.cfg.update(out_dir=dir_var.get().strip() or default_out_dir(),
+                                tile=int(size_seg.get().split()[0]),
+                                keep_original=bool(keep_v.get()), check_updates=bool(chk_v.get()),
+                                auto_install=bool(auto_v.get()))
+                save_config(self.cfg)
+                top.destroy()
+                self.refresh_preview()
+            row = ctk.CTkFrame(top, fg_color="transparent")
+            row.grid(row=1, column=0, sticky="e", padx=24, pady=(0, 18))
+            self.button(row, "Cancel", top.destroy, "ghost", width=100).pack(side="left", padx=(0, 8))
+            self.button(row, "Save", save_close, "accent", width=100).pack(side="left")
+
+        # ================= updates =================
+        def _after_start(self):
+            last = self.cfg.get("last_version")
+            if last and parse_version(last) < parse_version(__version__):
+                self.show_changelog(after=last)
+            if self.cfg.get("last_version") != __version__:
+                self.cfg["last_version"] = __version__
+                save_config(self.cfg)
+            if self.cfg.get("check_updates", True):
+                self.root.after(1200, lambda: self.check_updates(manual=False))
+
+        def _set_update_btn(self, text, kind="ghost"):
+            styles = {"ghost": (C["card_hi"], C["border"], C["text"]),
+                      "accent": (C["accent"], C["accent_hover"], "white"),
+                      "ok": (C["card_hi"], C["border"], C["good"])}
+            fg, hov, tc = styles[kind]
+            self.update_btn.configure(text=text, fg_color=fg, hover_color=hov, text_color=tc)
+
+        def on_update_btn(self):
+            if self.update_info:
+                self.confirm_update(self.update_info)
+            else:
+                self.check_updates(manual=True)
+
         def check_updates(self, manual):
-            self.check_btn.config(state="disabled", text="Checking…")
+            self._set_update_btn("Checking…")
+            self.update_btn.configure(state="disabled")
 
             def run():
                 try:
@@ -1068,53 +1443,56 @@ def run_gui():
             threading.Thread(target=run, daemon=True).start()
 
         def _update_checked(self, info, err, manual):
-            self.check_btn.config(state="normal", text="Check for updates")
+            self.update_btn.configure(state="normal")
             if err:
+                self._set_update_btn("Check for updates")
                 if manual:
-                    self.log(f"✖ Update check failed: {err}", "err")
+                    self.say(f"Update check failed: {err}", "err")
                 return
             if not info:
+                self._set_update_btn("✓  Up to date", "ok")
                 if manual:
-                    self.log(f"✔ You're on the latest version (v{__version__}).", "ok")
+                    self.say(f"You're on the latest version (v{__version__}).", "ok")
                 return
             self.update_info = info
-            self.update_msg.config(text=f"v{info['version']} is available")
-            self.update_btn.pack(side="left")
-            self.log(f"New version v{info['version']} is available. Click “Update now”.", "ok")
-            notes = info["notes"][:600] or "(no release notes)"
-            if messagebox.askyesno("Update available",
-                                   f"Emotes Downloader v{info['version']} is out (you have v{__version__}).\n\n"
-                                   f"What's new:\n{notes}\n\nUpdate now? The app will restart."):
-                self.on_update_now()
+            self._set_update_btn(f"⬇  Update to v{info['version']}", "accent")
+            idle = not self.busy and not self.items
+            if not manual and self.cfg.get("auto_install", True) and idle:
+                self.say(f"Installing update v{info['version']}…", "busy")
+                self.start_update(info)
+            else:
+                self.confirm_update(info)
 
-        def on_update_now(self):
-            info = self.update_info
-            if not info or self.busy:
+        def confirm_update(self, info):
+            notes = format_changelog([(info["version"], "", info["notes"])])
+            self.text_dialog("Update available", f"Update available: v{info['version']}",
+                             f"You have v{__version__}. The app restarts after updating.", notes,
+                             [("Later", "ghost", None), ("Update now", "accent", lambda: self.start_update(info))])
+
+        def start_update(self, info):
+            if self.busy:
+                self.say("Finish the current job first, then update.", "warn")
                 return
-            self.update_btn.config(state="disabled", text="Updating…")
+            self.update_btn.configure(state="disabled")
 
-            def job():
-                apply_update(info)
-                return True
+            def prog(p):
+                self.ui(lambda: self._set_update_btn(f"Downloading {int(p * 100)}%", "accent"))
 
             def done(_):
-                self.log("✔ Update installed, restarting…", "ok")
-                self.root.after(600, lambda: (self.root.destroy(), os._exit(0)))
+                self.say("Update downloaded. Restarting…", "ok")
+                self.root.after(700, lambda: (self.root.destroy(), os._exit(0)))
 
-            def fail_reset():
-                self.update_btn.config(state="normal", text="Update now")
-            self.work(job, done, label=f"Downloading v{info['version']} from GitHub…")
-            self.root.after(100, lambda: self._watch_update(fail_reset))
+            def job():
+                try:
+                    apply_update(info, prog)
+                except Exception:
+                    self.ui(lambda: (self.update_btn.configure(state="normal"),
+                                     self._set_update_btn(f"⬇  Update to v{info['version']}", "accent")))
+                    raise
+            self.work(job, done, f"Downloading v{info['version']} from GitHub…")
 
-        def _watch_update(self, reset):
-            if self.busy:
-                self.root.after(200, lambda: self._watch_update(reset))
-            elif self.update_btn.cget("text") == "Updating…":
-                reset()
-
-    root = tk.Tk()
+    root = ctk.CTk()
     App(root)
-    root.geometry("1140x820")
     root.mainloop()
 
 

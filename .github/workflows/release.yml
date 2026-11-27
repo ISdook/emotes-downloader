@@ -1,8 +1,8 @@
 name: Release
 
-# Push a tag like v1.0.1 (or publish a release on GitHub with that tag)
-# -> builds the Windows .exe and attaches it to the GitHub Release.
-# The app's updater downloads from the latest release.
+# Publish a release on GitHub (or push a tag) named like v1.2.0.
+# This builds the portable .exe, the setup .exe and the Python zip, and attaches them to the release.
+# The release notes come from CHANGELOG.md, and the app's auto-updater downloads from the latest release.
 on:
   push:
     tags: ["v*"]
@@ -26,27 +26,61 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Check the tag matches __version__
+      - name: Check version and changelog
+        id: meta
         shell: bash
         run: |
-          V=$(python -c "import re;print(re.search(r'__version__ = \"([^\"]+)\"', open('emotes_downloader.py', encoding='utf-8').read()).group(1))")
+          V=$(python tools/release_notes.py version)
           if [ "v$V" != "$GITHUB_REF_NAME" ]; then
-            echo "Tag $GITHUB_REF_NAME doesn't match __version__ = $V in emotes_downloader.py"; exit 1
+            echo "::error::Tag $GITHUB_REF_NAME doesn't match __version__ = $V in emotes_downloader.py"; exit 1
           fi
+          python tools/release_notes.py notes "$V" > release_notes.md
+          echo "version=$V" >> "$GITHUB_OUTPUT"
 
-      - name: Build the .exe
+      - name: Install build tools
+        run: pip install pillow customtkinter pyinstaller
+
+      - name: Build portable .exe
+        run: >
+          pyinstaller --noconfirm --clean --onefile --windowed
+          --name Emotes-Downloader-Portable --icon assets/icon.ico
+          --add-data "assets;assets" --add-data "CHANGELOG.md;."
+          --collect-data customtkinter --hidden-import PIL._tkinter_finder
+          emotes_downloader.py
+
+      - name: Build app folder for the installer
+        run: >
+          pyinstaller --noconfirm --onedir --windowed
+          --name "Emotes Downloader" --icon assets/icon.ico
+          --add-data "assets;assets" --add-data "CHANGELOG.md;."
+          --collect-data customtkinter --hidden-import PIL._tkinter_finder
+          --distpath dist/app --workpath build/app
+          emotes_downloader.py
+
+      - name: Build setup .exe
+        shell: pwsh
         run: |
-          pip install pillow pyinstaller
-          pyinstaller --noconfirm --onefile --windowed --name emotes-downloader emotes_downloader.py
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y --no-progress
+          }
+          & $iscc "/DAppVersion=${{ steps.meta.outputs.version }}" installer.iss
+          if ($LASTEXITCODE -ne 0) { exit 1 }
 
       - name: Zip the Python version
         shell: pwsh
-        run: Compress-Archive -Path emotes_downloader.py,run.bat,build_exe.bat,README.md,requirements.txt -DestinationPath emotes-downloader-python.zip
+        run: |
+          New-Item -ItemType Directory -Force py/assets | Out-Null
+          Copy-Item emotes_downloader.py,run.bat,build_exe.bat,installer.iss,README.md,CHANGELOG.md,requirements.txt py/
+          Copy-Item assets/* py/assets/
+          Compress-Archive -Path py/* -DestinationPath Emotes-Downloader-Python.zip
 
       - uses: softprops/action-gh-release@v2
         with:
-          generate_release_notes: true
+          name: Emotes Downloader v${{ steps.meta.outputs.version }}
+          body_path: release_notes.md
           files: |
-            dist/emotes-downloader.exe
+            dist/Emotes-Downloader-Portable.exe
+            dist/Emotes-Downloader-Setup.exe
             emotes_downloader.py
-            emotes-downloader-python.zip
+            Emotes-Downloader-Python.zip
