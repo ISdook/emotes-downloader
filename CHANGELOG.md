@@ -2,6 +2,16 @@
 
 Every release gets an entry here. The release build fails without one, and the text becomes the GitHub release notes and the app's "What's new" window.
 
+## v1.8.2 — 2026-11-27
+- Fixed: for some people, "Update now" did nothing or the app closed and didn't come back
+  - Portable version: updating broke when the app's folder had Arabic or other non-English letters in its path (for example a Windows user name or OneDrive's Desktop folder). The new version now finishes the update by itself, and works in any folder
+  - If an update fails, a window now says why, with **Try again** and **Download it myself** buttons. Before, the reason only flashed in the status bar
+  - Pressing Update while a save or download is running now waits for it to finish, instead of doing nothing
+  - The app checks it can save files in its own folder before downloading, and explains what to do if it can't
+  - Installed version: if Windows needs permission to run the installer, it now asks instead of failing
+  - Update problems are written to update.log in the app's data folder
+- If your current version still can't update itself, download the new version once from the GitHub releases page. Updates work by themselves after that
+
 ## v1.8.1 — 2026-11-27
 - Browse 7TV: animated emotes now play in the grid, like on 7tv.app, instead of showing only the first frame
   - Only the emotes you can see are animated, so scrolling stays smooth

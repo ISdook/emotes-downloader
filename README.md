@@ -224,6 +224,7 @@ Your bot token and Discord login are stored encrypted on your PC (Windows DPAPI)
 - **Send to Discord shows a red line:** the line says why. The usual reasons are no free slots, or that you or the bot are missing the **Manage Expressions** permission in that server.
 - **"Private application cannot have a default authorization link":** in the Developer Portal open **Installation**, set **Install Link** to **None**, save, then turn off **Public Bot** again.
 - **Discord login doesn't finish** (step 5): check that the redirect `http://127.0.0.1:53682/callback` is saved on the OAuth2 page, exactly like that.
+- **Update now doesn't work:** the app shows a window with the reason, plus **Try again** and **Download it myself**. With the portable version, keep the app in a normal folder like Documents or Desktop (not Program Files). If a very old version can't update itself, download the latest version once from the [releases page](https://github.com/ISdook/emotes-downloader/releases/latest).
 - **Something went wrong:** click **Log** at the bottom right of the app to see what happened. You can also [open an issue](https://github.com/ISdook/emotes-downloader/issues).
 
 ---

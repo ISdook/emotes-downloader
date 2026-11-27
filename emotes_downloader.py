@@ -24,6 +24,7 @@ import queue
 import re
 import subprocess
 import sys
+import shutil
 import tempfile
 import threading
 import time
@@ -38,7 +39,7 @@ except ImportError:  # pragma: no cover
     print("Pillow is missing. Install it with:  python -m pip install pillow")
     sys.exit(1)
 
-__version__ = "1.8.1"
+__version__ = "1.8.2"
 UA = f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) emotes-downloader/{__version__}"
 GITHUB_REPO = "ISdook/emotes-downloader"
 PORTABLE_ASSET = "Emotes-Downloader-Portable.exe"
@@ -1448,6 +1449,90 @@ def _relaunch(cmd):
     subprocess.Popen(cmd, creationflags=_detached(), close_fds=True)
 
 
+FINISH_ARG = "--finish-update"
+
+
+def _pid_alive(pid):
+    if sys.platform.startswith("win"):
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        h = k32.OpenProcess(0x00100000, False, int(pid))      # SYNCHRONIZE
+        if not h:
+            return False
+        try:
+            return k32.WaitForSingleObject(h, 0) == 0x102     # WAIT_TIMEOUT = still running
+        finally:
+            k32.CloseHandle(h)
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except OSError:
+        return False
+
+
+def update_log(msg):
+    try:
+        with open(data_dir() / "update.log", "a", encoding="utf-8") as f:
+            f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + msg + "\n")
+    except Exception:
+        pass
+
+
+def finish_portable_update(old, pid):
+    """Runs inside the NEW portable .exe: wait for the old app to close, copy this .exe over it, start it.
+    Plain Python, so folders with Arabic or other non-English names work (the old .bat broke on them)."""
+    old, me = Path(old), Path(sys.executable)
+    for _ in range(120):
+        if not _pid_alive(pid):
+            break
+        time.sleep(0.25)
+    err = None
+    for _ in range(60):                                   # the old .exe can stay locked for a moment
+        try:
+            shutil.copyfile(me, old)
+            err = None
+            break
+        except OSError as e:
+            err = e
+            time.sleep(0.5)
+    if err is None:
+        update_log(f"portable update: replaced {old}")
+        subprocess.Popen([str(old)], creationflags=_detached(), close_fds=True, cwd=str(old.parent))
+        return None
+    update_log(f"portable update: couldn't replace {old}: {err}")
+    return (f"The new version is running, but Windows didn't let it replace the old file:\n{old}\n\n"
+            f"({err})\n\nYou can keep using “{me.name}”, or close the app and rename it yourself. "
+            "Moving the app to a normal folder like Documents helps next time.")
+
+
+def cleanup_after_update():
+    """Delete the leftover '<name>.new.exe' from a portable update (it may still be closing, so retry)."""
+    if not is_frozen() or install_kind() != "portable":
+        return
+    me = Path(sys.executable).resolve()
+    if me.stem.endswith(".new"):
+        return
+    left = me.with_name(me.stem + ".new.exe")
+
+    def job():
+        for _ in range(30):
+            if not left.exists():
+                return
+            try:
+                left.unlink()
+                return
+            except OSError:
+                time.sleep(1)
+    threading.Thread(target=job, daemon=True).start()
+
+
+STARTUP_NOTE = []      # (heading, text) shown in a window once the app starts
+
+
+class UpdateError(RuntimeError):
+    pass
+
+
 def _check_exe(data):
     if len(data) < 1_000_000 or data[:2] != b"MZ":
         raise RuntimeError("The downloaded file looks broken, update cancelled.")
@@ -1467,8 +1552,16 @@ def apply_update(info, progress=None):
         path = Path(tempfile.gettempdir()) / f"Emotes-Downloader-Setup-{info['version']}.exe"
         path.write_bytes(data)
         # The installer closes this app, updates it in place and starts it again.
-        subprocess.Popen([str(path), "/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS"],
-                         creationflags=_detached(), close_fds=True)
+        args = ["/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS"]
+        try:
+            subprocess.Popen([str(path)] + args, creationflags=_detached(), close_fds=True)
+        except OSError as e:
+            update_log(f"setup update: CreateProcess failed ({e}), trying ShellExecute")
+            try:
+                os.startfile(str(path), "open", " ".join(args))  # noqa (shows the Windows permission prompt if needed)
+            except OSError as e2:
+                raise UpdateError(f"Windows didn't let the installer start ({e2}). "
+                                  "An antivirus may be blocking it.") from None
         return
 
     if kind == "portable":
@@ -1476,30 +1569,28 @@ def apply_update(info, progress=None):
         if not url:
             raise RuntimeError("This release has no portable .exe yet (it may still be building). Try again in a few minutes.")
         exe = Path(sys.executable).resolve()
+        new = exe.with_name(exe.stem + ".new.exe")
+        try:                                              # check we may write here before downloading 20+ MB
+            probe = exe.with_name(".emotes_update_test")
+            probe.write_bytes(b"ok")
+            probe.unlink()
+        except OSError as e:
+            raise UpdateError(f"Windows doesn't let the app save files in its own folder:\n{exe.parent}\n\n"
+                              "Move Emotes Downloader to a normal folder like Documents or Desktop, "
+                              f"or download the update yourself. ({e.__class__.__name__})") from None
         data = download(url, progress, timeout=180)
         _check_exe(data)
-        new = exe.with_name(exe.stem + ".new.exe")
-        new.write_bytes(data)
-        pid = os.getpid()
-        bat = Path(tempfile.gettempdir()) / f"emotes_downloader_update_{pid}.bat"
-        bat.write_text(
-            "@echo off\r\n"
-            "set n=0\r\n"
-            ":wait\r\n"
-            f'tasklist /FI "PID eq {pid}" 2>nul | find "{pid}" >nul && '
-            "(timeout /t 1 /nobreak >nul & goto wait)\r\n"
-            ":move\r\n"
-            f'move /y "{new}" "{exe}" >nul 2>nul\r\n'
-            "if not errorlevel 1 goto done\r\n"
-            "set /a n+=1\r\n"
-            "if %n% geq 30 goto done\r\n"
-            "timeout /t 1 /nobreak >nul\r\n"
-            "goto move\r\n"
-            ":done\r\n"
-            f'start "" "{exe}"\r\n'
-            'del "%~f0"\r\n', encoding="utf-8")
-        subprocess.Popen(["cmd", "/c", str(bat)],
-                         creationflags=subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS, close_fds=True)
+        try:
+            new.write_bytes(data)
+        except OSError as e:
+            raise UpdateError(f"Couldn't save the update next to the app ({e}). An antivirus may be blocking it.") from None
+        # The new .exe waits for this app to close, copies itself over it and starts it again.
+        try:
+            subprocess.Popen([str(new), FINISH_ARG, str(exe), str(os.getpid())],
+                             creationflags=_detached(), close_fds=True, cwd=str(exe.parent))
+        except OSError as e:
+            raise UpdateError(f"Windows didn't let the new version start ({e}). An antivirus may be blocking it.") from None
+        update_log(f"portable update: started {new.name}")
         return
 
     # Python version: replace this script (and the changelog), then restart.
@@ -2649,7 +2740,8 @@ def run_gui(start_hidden=False):
             row = ctk.CTkFrame(top, fg_color="transparent")
             row.grid(row=3, column=0, sticky="e", padx=24, pady=18)
             for label, kind, cmd in buttons:
-                self.button(row, label, lambda c=cmd: (top.destroy(), c and c()), kind, width=120).pack(side="left", padx=(8, 0))
+                self.button(row, label, lambda c=cmd: (top.destroy(), c and c()), kind,
+                            width=max(120, 8 * len(label) + 40)).pack(side="left", padx=(8, 0))
             return top
 
         def show_log(self):
@@ -5015,6 +5107,9 @@ def run_gui(start_hidden=False):
 
         # ================= updates =================
         def _after_start(self):
+            cleanup_after_update()
+            for heading, text in STARTUP_NOTE:
+                self.text_dialog("Update", heading, "", text, [("OK", "accent", None)])
             last = self.cfg.get("last_version")
             if last and parse_version(last) < parse_version(__version__):
                 self.show_changelog(after=last)
@@ -5092,9 +5187,35 @@ def run_gui(start_hidden=False):
                              f"You have v{__version__}. The app restarts after updating.", notes,
                              [("Later", "ghost", None), ("Update now", "accent", lambda: self.start_update(info))])
 
+        def update_failed(self, info, err):
+            update_log(f"update to v{info['version']} failed: {err!r}")
+            self.say("The update didn't work. See the window for why.", "err")
+            asset = {"setup": SETUP_ASSET, "portable": PORTABLE_ASSET}.get(install_kind())
+            link = info["assets"].get(asset) if asset else None
+            self.show_window()
+            self.text_dialog("Update didn't work", "The update didn't work",
+                             f"You still have v{__version__}. Nothing was changed.",
+                             f"{err}\n\nWhat you can do:\n"
+                             "•  Press Try again (a slow or blocked connection is the most common reason).\n"
+                             "•  Or press Download it myself, then run the downloaded file. "
+                             "Your settings are kept.",
+                             [("Close", "ghost", None),
+                              ("Download it myself", "ghost", lambda: __import__("webbrowser").open(link or info["page"])),
+                              ("Try again", "accent", lambda: self.start_update(info))])
+
         def start_update(self, info):
-            if self.busy:
-                self.say("Finish the current job first, then update.", "warn")
+            if self.busy:                                 # don't refuse: start as soon as the current job is done
+                if not getattr(self, "_upd_waiting", False):
+                    self._upd_waiting = True
+                    self.say(f"Update v{info['version']} starts as soon as the current job is done…", "busy")
+
+                    def wait():
+                        if self.busy:
+                            self.root.after(800, wait)
+                            return
+                        self._upd_waiting = False
+                        self.start_update(info)
+                    self.root.after(800, wait)
                 return
             self.update_btn.configure(state="disabled")
 
@@ -5114,15 +5235,22 @@ def run_gui(start_hidden=False):
             def job():
                 try:
                     apply_update(info, prog)
-                except Exception:
-                    def back():
+                except Exception as e:  # noqa
+                    def back(e=e):
                         self.upd_state = "available"
                         self.update_btn.configure(state="normal")
                         self._set_update_btn(f" Update to v{info['version']}", "accent", "download")
                         self._flyout_refresh()
+                        self.update_failed(info, e)
                     self.ui(back)
-                    raise
-            self.work(job, done, f"Downloading v{info['version']} from GitHub…")
+                    return False
+                return True
+
+            def finished(ok):
+                if ok:
+                    done(ok)
+            if not self.work(job, finished, f"Downloading v{info['version']} from GitHub…"):
+                self.update_btn.configure(state="normal")
 
     try:
         from tkinterdnd2 import TkinterDnD, DND_FILES, DND_TEXT
@@ -5198,7 +5326,13 @@ def run_cli(argv):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "--update":
+    if len(sys.argv) > 3 and sys.argv[1] == FINISH_ARG:
+        note = finish_portable_update(sys.argv[2], sys.argv[3])
+        if note is None:
+            os._exit(0)
+        STARTUP_NOTE.append(("Update almost done", note))
+        run_gui()
+    elif len(sys.argv) > 1 and sys.argv[1] == "--update":
         info = check_for_update()
         if not info:
             print(f"Already up to date (v{__version__}).")
