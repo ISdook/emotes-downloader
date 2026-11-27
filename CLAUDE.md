@@ -46,7 +46,7 @@ Dependencies: Python 3.12, Pillow, customtkinter, pystray, tkinterdnd2. PyInstal
 2. Add a `## vX.Y.Z — YYYY-MM-DD` section at the top of `CHANGELOG.md`. Write it for users, in plain English.
 3. Update `README.md` if a feature or screen changed.
 4. Commit, then push to `main`.
-5. Publish a GitHub release with the tag `vX.Y.Z`, target `main`, title `vX.Y.Z` and the changelog section as its text (pushing the tag also works). The workflow checks that the tag matches `__version__` and attaches four files. The updater depends on these names, so don't rename them:
+5. Publish a GitHub release with the tag `vX.Y.Z`, target `main`, title `vX.Y.Z` and the changelog section as its text. Pushing the tag also works from a normal PC, but Claude's cloud sandbox can't push tags (HTTP 403), so publish there through the GitHub website. The workflow checks that the tag matches `__version__` and attaches four files. The updater depends on these names, so don't rename them:
    - `Emotes-Downloader-Portable.exe`
    - `Emotes-Downloader-Setup.exe`
    - `emotes_downloader.py`
