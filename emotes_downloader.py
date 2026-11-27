@@ -1333,23 +1333,42 @@ def run_gui(start_hidden=False):
             body.grid_rowconfigure(0, weight=1)
             self.body = body
 
-            # sidebar (only for sets)
-            self.side = self.card(body, width=250)
+            # files panel (same as the Converter's)
+            self.side = self.card(body, width=270)
+            self.side.grid_propagate(False)
             self.side.grid_rowconfigure(1, weight=1)
             self.side.grid_columnconfigure(0, weight=1)
             sh = ctk.CTkFrame(self.side, fg_color="transparent")
             sh.grid(row=0, column=0, sticky="ew", padx=14, pady=(14, 6))
-            self.side_title = self.section(sh, "Emotes")
+            self.side_title = self.section(sh, "Files")
             self.side_title.pack(side="left")
             self.all_var = tk.BooleanVar(value=False)
             ctk.CTkCheckBox(sh, text="All", variable=self.all_var, command=self.on_check_all, width=20,
                             checkbox_width=18, checkbox_height=18, corner_radius=5, font=self.F(12),
                             fg_color=C["accent"], hover_color=C["accent_hover"], border_color=C["faint"],
                             text_color=C["muted"]).pack(side="right")
-            self.list_frame = ctk.CTkScrollableFrame(self.side, fg_color="transparent", width=220,
+            lw = ctk.CTkFrame(self.side, fg_color=C["field"], corner_radius=12)
+            lw.grid(row=1, column=0, sticky="nsew", padx=12)
+            lw.grid_rowconfigure(0, weight=1)
+            lw.grid_columnconfigure(0, weight=1)
+            self.list_frame = ctk.CTkScrollableFrame(lw, fg_color="transparent",
                                                      scrollbar_button_color=C["card_hi"],
                                                      scrollbar_button_hover_color=C["border"])
-            self.list_frame.grid(row=1, column=0, sticky="nsew", padx=6, pady=(0, 10))
+            self.list_frame.grid(row=0, column=0, sticky="nsew", padx=2, pady=4)
+            self.em_empty = ctk.CTkFrame(lw, fg_color="transparent")
+            ctk.CTkLabel(self.em_empty, text="", image=self.ico("download", C["faint"], 34)).pack(pady=(0, 10))
+            self.label(self.em_empty, "Drop files here", 14, bold=True).pack()
+            self.label(self.em_empty, "images, GIFs, videos, a folder\nor a 7TV link", 12, "muted",
+                       justify="center").pack(pady=(2, 0))
+            self.em_empty.place(relx=0.5, rely=0.45, anchor="center")
+            ebr = ctk.CTkFrame(self.side, fg_color="transparent")
+            ebr.grid(row=2, column=0, sticky="ew", padx=12, pady=12)
+            ebr.grid_columnconfigure((0, 1), weight=1)
+            self.button(ebr, "Add files", self.em_pick_files, "ghost", height=34).grid(row=0, column=0, sticky="ew", padx=(0, 4))
+            self.button(ebr, "Add folder", self.em_pick_folder, "ghost", height=34,
+                        image=self.ico("folder", C["text"], 14), compound="left").grid(row=0, column=1, sticky="ew", padx=(4, 0))
+            self.button(ebr, "Remove", self.em_remove, "flat", height=30).grid(row=1, column=0, sticky="ew", padx=(0, 4), pady=(6, 0))
+            self.button(ebr, "Clear all", self.em_clear, "flat", height=30).grid(row=1, column=1, sticky="ew", padx=(4, 0), pady=(6, 0))
 
             # preview
             prev = self.card(body)
@@ -1448,7 +1467,7 @@ def run_gui(start_hidden=False):
             # initial values
             inv_f = {v: k for k, v in FITS.items()}
             self.fit_seg.set(inv_f.get(self.cfg["fit"], "Fill"))
-            self._show_sidebar(False)
+            self._show_sidebar(True)
             self._sync_save_to()
             self._build_converter(r)
             self._build_drop_overlay(r)
@@ -1474,11 +1493,8 @@ def run_gui(start_hidden=False):
                           command=lambda: bump(1)).pack(side="left", padx=2, pady=2)
             return f
 
-        def _show_sidebar(self, show):
-            if show:
-                self.side.grid(row=0, column=0, sticky="ns", padx=(0, 14))
-            else:
-                self.side.grid_forget()
+        def _show_sidebar(self, show=True):
+            self.side.grid(row=0, column=0, sticky="ns", padx=(0, 14))  # always shown now
 
         # ================= plumbing =================
         def _poll(self):
@@ -1613,7 +1629,8 @@ def run_gui(start_hidden=False):
                 if not refs:
                     self.say("That emote set is empty.", "warn")
                     return
-                self.set_items(title, [dict(name=x.name, ref=x, path=None, frames=None, raw=None) for x in refs])
+                self.set_items(title, [dict(name=x.name, ref=x, path=None, frames=None, raw=None) for x in refs],
+                               append=(kind == "emote"))
                 if len(refs) > 1:
                     self.say(f"Loaded “{title}” with {len(refs)} emotes. Pick one to preview, or Save all.", "ok")
             self.work(job, done, "Looking it up on 7TV…")
@@ -1628,26 +1645,89 @@ def run_gui(start_hidden=False):
 
         def _load_file(self, path):
             name = Path(path).stem
-            self.set_items(None, [dict(name=name, ref=None, path=path, frames=None, raw=None)])
+            self.set_items(None, [dict(name=name, ref=None, path=path, frames=None, raw=None)], append=True)
 
-        def set_items(self, title, items):
-            self.items = items
-            self.set_title = title if len(items) > 1 else None
+        @staticmethod
+        def _item_key(it):
+            return ("7tv", it["ref"].id) if it.get("ref") is not None else ("file", str(it.get("path")))
+
+        def set_items(self, title, items, append=False):
+            """Show items in the Files list. append=True adds to the list (skipping ones already there)."""
+            if append and self.items:
+                have = {self._item_key(it) for it in self.items}
+                new = [it for it in items if self._item_key(it) not in have]
+                if not new:  # already in the list: just select it
+                    keys = [self._item_key(it) for it in self.items]
+                    self.select_item(keys.index(self._item_key(items[0])))
+                    return
+                first = len(self.items)
+                self.items = self.items + new
+                self.set_title = None
+            else:
+                first = 0
+                self.items = list(items)
+                self.set_title = title if len(items) > 1 else None
+            self._rebuild_rows()
+            if self.items:
+                self.select_item(first)
+
+        def _rebuild_rows(self):
             for w in self.list_frame.winfo_children():
                 w.destroy()
             self.rows = []
-            multi = len(items) > 1
-            self._show_sidebar(multi)
-            if multi:
-                self.side_title.configure(text=f"IN THIS SET · {len(items)}")
-                for i, it in enumerate(items):
-                    self._add_row(i, it)
+            for i, it in enumerate(self.items):
+                self._add_row(i, it)
+            n = len(self.items)
+            self.side_title.configure(text=f"FILES · {n}" if n else "FILES")
+            if n:
+                self.em_empty.place_forget()
+            else:
+                self.em_empty.place(relx=0.5, rely=0.45, anchor="center")
+            if n > 1:
                 self.save_all_btn.grid(row=8, column=0, padx=18, pady=(8, 0), sticky="ew")
-                self.all_var.set(False)
-                self._update_save_all()
             else:
                 self.save_all_btn.grid_forget()
-            self.select_item(0)
+            self.all_var.set(False)
+            self._update_save_all()
+
+        def em_pick_files(self):
+            ps = filedialog.askopenfilenames(title="Add images, GIFs or videos", filetypes=[
+                ("Images and videos", " ".join("*" + e for e in sorted(MEDIA_EXT))), ("All files", "*.*")])
+            if ps:
+                self.load_paths(list(ps))
+
+        def em_pick_folder(self):
+            d = filedialog.askdirectory(title="Add every image, GIF and video in a folder")
+            if d:
+                self.load_paths([d])
+
+        def em_remove(self):
+            gone = self._checked() or ([self.current] if self.current is not None else [])
+            if not gone:
+                return
+            ids = {id(it) for it in gone}
+            self.items = [it for it in self.items if id(it) not in ids]
+            if self.current is not None and id(self.current) in ids:
+                self.current = None
+            self._rebuild_rows()
+            if self.items and self.current is None:
+                self.select_item(0)
+            elif not self.items:
+                self.em_clear()
+            else:
+                idx = self.items.index(self.current)
+                for j, (_, _, btn) in enumerate(self.rows):
+                    btn.configure(fg_color=C["card_hi"] if j == idx else "transparent")
+            self.say(f"Removed {len(gone)} from the list.", "info")
+
+        def em_clear(self):
+            self.items, self.current, self.set_title = [], None, None
+            self._rebuild_rows()
+            self._name_lock = True
+            self.name_var.set("")
+            self._name_lock = False
+            self._set_buttons()
+            self.refresh_preview()
 
         def _add_row(self, i, it):
             row = ctk.CTkFrame(self.list_frame, fg_color="transparent", corner_radius=8)
@@ -2212,15 +2292,13 @@ def run_gui(start_hidden=False):
                 self.say("No images, GIFs or videos found in what you dropped.", "warn")
                 return
             items = [dict(name=f.stem, ref=None, path=str(f), frames=None, raw=None) for f in files]
-            if len(items) == 1:
-                self.url_entry.delete(0, "end")
-                self.url_entry.insert(0, str(files[0]))
-                self.set_items(None, items)
+            dirs = [Path(p) for p in paths if Path(p).is_dir()]
+            if not self.items and len(dirs) == 1 and len(paths) == 1 and len(items) > 1:
+                self.set_items(dirs[0].name, items)  # a folder into an empty list: save all goes into that folder name
             else:
-                dirs = [Path(p) for p in paths if Path(p).is_dir()]
-                title = dirs[0].name if len(dirs) == 1 and len(paths) == 1 else "Dropped files"
-                self.set_items(title, items)
-                self.say(f"Loaded {len(items)} files. Pick one to preview, or Save all.", "ok")
+                self.set_items(None, items, append=True)
+            if len(items) > 1:
+                self.say(f"Added {len(items)} files. Pick one to preview, or Save all.", "ok")
 
         def ask_ffmpeg(self, then=None):
             if getattr(self, "_ffmpeg_busy", False):
@@ -3179,7 +3257,7 @@ def run_gui(start_hidden=False):
                 it = dict(name=ref.name, ref=ref, path=None, frames=None, raw=None)
                 self.url_entry.delete(0, "end")
                 self.url_entry.insert(0, f"https://7tv.app/emotes/{ref.id}")
-                self.set_items(None, [it])
+                self.set_items(None, [it], append=True)
                 self.show_window()
 
             def save_it(i, ref):

@@ -34,6 +34,7 @@ The full history is in [CHANGELOG.md](CHANGELOG.md).
 1. Get an emote. There are three ways:
    - Press **🔍 Browse 7TV**. Search, or look through Trending, Top and New. Press **⬇ Save** on any emote to save it right away, or **Open** to check the cut first.
    - Copy an emote link on [7tv.app](https://7tv.app/emotes). The app notices the copied link and shows a bar with **Save now**.
+   - Use **Add files** / **Add folder** in the **Files** panel on the left, or drop files on the window. Everything you add is kept in the list until you **Remove** it or press **Clear all**.
    - Paste a link into the box and press **Load**. This works with an emote, an emote set (`https://7tv.app/emote-sets/<id>`) or a user (`https://7tv.app/users/<id>`). You can also **Open file** for a GIF/PNG/WebP on your PC.
 2. Check the cut. **Auto** picks how many square pieces the emote needs, so each piece is one full-height square. For example, the 384×112 emote [OdaMeeting](https://7tv.app/emotes/01FD667N200009ZAD9VPCVD4JX) becomes 4 pieces, `:OdaMeeting1:` to `:OdaMeeting4:`. The preview shows every piece separately with its name under it. To choose the pieces yourself, use the **Wide / Tall** buttons, and press **Auto** to go back.
 3. Pick how it fits:

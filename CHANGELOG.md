@@ -5,6 +5,7 @@ Every release gets an entry here. The release build fails without one, and the t
 ## v1.5.1 — 2026-11-27
 - Left-click the tray icon to open the app; right-click opens the tray panel
 - The Converter now makes only GIF and PNG, the formats that matter for Discord emotes (Auto picks GIF for animated, PNG for still)
+- The Emotes tab now has a Files panel like the Converter: Add files, Add folder, Remove and Clear all. Files, folders, drops and single 7TV emotes are added to the list; loading a 7TV set still replaces it
 
 ## v1.5.0 — 2026-11-27
 - New **Converter** tab: turn any image, GIF, WebP, AVIF or video (MP4, WebM, MOV…) into a Discord emoji, a sticker or any custom size, all on your own PC
