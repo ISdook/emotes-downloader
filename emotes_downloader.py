@@ -38,7 +38,7 @@ except ImportError:  # pragma: no cover
     print("Pillow is missing. Install it with:  python -m pip install pillow")
     sys.exit(1)
 
-__version__ = "1.8.0"
+__version__ = "1.8.1"
 UA = f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) emotes-downloader/{__version__}"
 GITHUB_REPO = "ISdook/emotes-downloader"
 PORTABLE_ASSET = "Emotes-Downloader-Portable.exe"
@@ -223,6 +223,31 @@ def fetch_thumb(ref):
         url = "https:" + url
     im = Image.open(io.BytesIO(http_get(f"{url}/2x.webp", timeout=20)))
     return im.convert("RGBA").copy()
+
+
+def fetch_thumb_frames(ref, box, max_frames=90):
+    """Preview frames for the Browse grid: every frame of 2x.webp (already composited by Pillow), scaled to fit
+    `box`. Returns (frames, durations_ms). A still emote gives one frame."""
+    url = ref.host.get("url") or f"//cdn.7tv.app/emote/{ref.id}"
+    if url.startswith("//"):
+        url = "https:" + url
+    src = Image.open(io.BytesIO(http_get(f"{url}/2x.webp", timeout=20)))
+    n = getattr(src, "n_frames", 1)
+    step = max(1, -(-n // max_frames))          # very long emotes: keep every Nth frame, same total time
+    frames, durs = [], []
+    for k in range(n):
+        src.seek(k)
+        d = int(src.info.get("duration") or 0)
+        d = d if d >= 20 else 100                # like browsers: 0/10 ms frames play at 100 ms
+        if k % step:
+            if durs:
+                durs[-1] += d
+            continue
+        fr = src.convert("RGBA")
+        fr.thumbnail(box, Image.Resampling.LANCZOS)
+        frames.append(fr)
+        durs.append(d)
+    return frames, durs
 
 
 def download_emote(ref):
@@ -4285,7 +4310,7 @@ def run_gui(start_hidden=False):
             top.grid_columnconfigure(0, weight=1)
             top.grid_rowconfigure(2, weight=1)
             st = dict(query="", cat="TRENDING_DAY", page=1, total=0, loading=False, gen=0, refs=[], cols=0,
-                      saved={}, thumbs={}, imgs={})
+                      saved={}, thumbs={}, imgs={}, durs={}, anim={}, ticking=False)
 
             head = ctk.CTkFrame(top, fg_color="transparent")
             head.grid(row=0, column=0, sticky="ew", padx=20, pady=(18, 8))
@@ -4408,16 +4433,50 @@ def run_gui(start_hidden=False):
 
             def place_thumb(i):
                 ref = st["refs"][i]
-                im = st["thumbs"].get(ref.id)
-                if im is None:
+                got_ = st["thumbs"].get(ref.id)
+                if got_ is None:
                     return
+                frames, durs = got_
                 x, y = origin(i)
                 if ref.id not in st["imgs"]:
-                    th = im.copy()
-                    th.thumbnail((CW - px(28), TH - px(10)), Image.Resampling.LANCZOS)
-                    st["imgs"][ref.id] = ImageTk.PhotoImage(th)
+                    st["imgs"][ref.id] = [ImageTk.PhotoImage(f) for f in frames]
+                    st["durs"][ref.id] = (durs, sum(durs))
                 cv.delete(f"thumb{i}")
-                cv.create_image(x + CW // 2, y + px(8) + TH // 2, image=st["imgs"][ref.id], tags=(f"thumb{i}", f"openarea{i}"))
+                cv.create_image(x + CW // 2, y + px(8) + TH // 2, image=st["imgs"][ref.id][0], tags=(f"thumb{i}", f"openarea{i}"))
+                if len(frames) > 1:
+                    st["anim"][i] = [ref.id, 0]
+                    if not st["ticking"]:
+                        st["ticking"] = True
+                        top.after(40, tick)
+
+            def tick():
+                """Plays the animated previews that are on screen. All emotes follow one clock, like on 7tv.app."""
+                if not top.winfo_exists():
+                    return
+                if not st["anim"]:
+                    st["ticking"] = False
+                    return
+                if top.state() != "iconic":
+                    now = int(time.monotonic() * 1000)
+                    y0 = cv.canvasy(0)
+                    y1 = y0 + cv.winfo_height()
+                    for i, a in list(st["anim"].items()):
+                        if i >= len(st["refs"]) or st["refs"][i].id != a[0]:
+                            st["anim"].pop(i, None)
+                            continue
+                        _, cy = origin(i)
+                        if cy + CH < y0 or cy > y1:
+                            continue                    # off screen: don't spend time on it
+                        durs, total = st["durs"][a[0]]
+                        t_ = now % max(1, total)
+                        k = 0
+                        while k < len(durs) - 1 and t_ >= durs[k]:
+                            t_ -= durs[k]
+                            k += 1
+                        if k != a[1]:
+                            a[1] = k
+                            cv.itemconfigure(f"thumb{i}", image=st["imgs"][a[0]][k])
+                top.after(40, tick)
 
             def redraw_all():
                 cv.delete("all")
@@ -4479,6 +4538,7 @@ def run_gui(start_hidden=False):
                     if cat is not None:
                         st["cat"] = cat
                     st.update(page=1, refs=[], gen=st["gen"] + 1)
+                    st["anim"].clear()
                     cv.yview_moveto(0)
                     redraw_all()
                 st["loading"] = True
@@ -4527,9 +4587,11 @@ def run_gui(start_hidden=False):
                     place_thumb(i)
                     return
 
+                box = (CW - px(28), TH - px(10))
+
                 def job():
                     try:
-                        im = fetch_thumb(ref)
+                        im = fetch_thumb_frames(ref, box)
                     except Exception:
                         im = None
                     self.thumb_cache[ref.id] = im

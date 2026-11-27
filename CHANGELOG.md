@@ -2,6 +2,11 @@
 
 Every release gets an entry here. The release build fails without one, and the text becomes the GitHub release notes and the app's "What's new" window.
 
+## v1.8.1 — 2026-11-27
+- Browse 7TV: animated emotes now play in the grid, like on 7tv.app, instead of showing only the first frame
+  - Only the emotes you can see are animated, so scrolling stays smooth
+  - Animations pause while the Browse window is minimized
+
 ## v1.8.0 — 2026-11-27
 - Linking your bot is much simpler: paste **one** thing, the bot token. The app finds your Discord app and your account from it, makes the bot private when Discord allows it, names it and opens the invite page
 - New step-by-step setup guide in Settings → Discord. Each step has buttons that open the right Developer Portal page, a Paste button, and turns green when it's done. It also explains the "Private application cannot have a default authorization link" error and how to fix it
