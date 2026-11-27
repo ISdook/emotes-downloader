@@ -15,6 +15,7 @@ Run with no arguments for the window, or use the command line:
 """
 
 import argparse
+import base64
 import io
 import json
 import math
@@ -27,6 +28,7 @@ import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -36,7 +38,7 @@ except ImportError:  # pragma: no cover
     print("Pillow is missing. Install it with:  python -m pip install pillow")
     sys.exit(1)
 
-__version__ = "1.6.0"
+__version__ = "1.7.0"
 UA = f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) emotes-downloader/{__version__}"
 GITHUB_REPO = "ISdook/emotes-downloader"
 PORTABLE_ASSET = "Emotes-Downloader-Portable.exe"
@@ -637,11 +639,12 @@ def retime(frames, fps):
     return [(im, max(20, int(round(d)))) for im, d in out]
 
 
-def convert_media(frames, width, height, fmt="auto", fit="auto", pixel=False, colors=256, fps=None, limit_kb=256):
+def convert_media(frames, width, height, fmt="auto", fit="auto", pixel=False, colors=256, fps=None, limit_kb=256,
+                  max_ms=None):
     """Resize/convert frames to GIF (animated) or PNG (still). Returns dict(data, ext, note, size, frames)."""
     method = Image.Resampling.NEAREST if pixel else LANCZOS
     animated = len(frames) > 1
-    fr = retime(frames, fps) if animated else frames[:1]
+    fr = retime(trim_frames(frames, max_ms), fps) if animated else frames[:1]
     fr = [(fit_frame(im, width, height, resolve_fit(fit, im.width, im.height, width, height), method), d) for im, d in fr]
     fmt = (("gif" if animated else "png") if fmt == "auto" else fmt).lower()
     limit = limit_kb * 1024 if limit_kb else None
@@ -701,6 +704,464 @@ def convert_media(frames, width, height, fmt="auto", fit="auto", pixel=False, co
                 frames=getattr(out, "n_frames", 1), over=not fits(data))
 
 
+STICKER_MAX_MS = 5000  # Discord: animated stickers can be at most 5 seconds long
+
+
+def trim_frames(frames, max_ms):
+    """Keep at most max_ms of animation."""
+    if not max_ms or len(frames) < 2:
+        return frames
+    out, t = [], 0
+    for f, d in frames:
+        if t + d > max_ms and out:
+            break
+        out.append((f, d))
+        t += d
+    return out
+
+
+# --------------------------------------------------------------------------
+# Discord: your own private bot adds emotes / stickers to your servers
+# --------------------------------------------------------------------------
+
+DISCORD_API = "https://discord.com/api/v10"
+DISCORD_PORT = 53682
+DISCORD_REDIRECT = f"http://127.0.0.1:{DISCORD_PORT}/callback"
+PERM_ADMIN = 1 << 3
+PERM_MANAGE_EXPR = 1 << 30
+PERM_CREATE_EXPR = 1 << 43
+BOT_PERMISSIONS = PERM_MANAGE_EXPR | PERM_CREATE_EXPR
+BOT_NAME = "ISdook - emotes downloader"   # the app keeps the bot's name and picture like this
+BOT_AVATAR_URLS = ("https://avatars.githubusercontent.com/u/221166014?s=512", "https://github.com/ISdook.png?size=512")
+BOT_DESCRIPTION = "Private bot for Emotes Downloader by ISdook. Adds emotes and stickers to your own servers."
+EMOJI_LIMITS = {0: 50, 1: 100, 2: 150, 3: 250}     # per type (static / animated), by boost level
+STICKER_LIMITS = {0: 5, 1: 15, 2: 30, 3: 60}
+DISCORD_ERRORS = {
+    10004: "This server can't be found. The bot may have been removed from it.",
+    30008: "No free emoji slots left in this server.",
+    30039: "No free sticker slots left in this server.",
+    40001: "Discord says the bot isn't authorized. Check the bot token in Settings → Discord.",
+    50001: "The bot can't access this server.",
+    50013: "The bot is missing the “Create Expressions” permission in this server.",
+    50045: "The file is too big for Discord.",
+    50046: "Discord couldn't read this image.",
+    50138: "Discord couldn't resize this image.",
+    170005: "Discord rejected the sticker file (it must be 320×320, at most 512 KB and 5 seconds).",
+    170006: "Discord couldn't read the sticker file.",
+}
+
+
+class DiscordError(RuntimeError):
+    def __init__(self, msg, status=0, code=0):
+        super().__init__(msg)
+        self.status, self.code = status, code
+
+
+def protect(text):
+    """Encrypt a secret for this Windows user (DPAPI). Other systems: only obfuscated."""
+    if not text:
+        return ""
+    raw = text.encode("utf-8")
+    if sys.platform.startswith("win"):
+        try:
+            return "dpapi:" + base64.b64encode(_dpapi(raw, True)).decode()
+        except Exception:
+            pass
+    return "b64:" + base64.b64encode(raw).decode()
+
+
+def unprotect(value):
+    if not value:
+        return ""
+    try:
+        kind, data = value.split(":", 1)
+        raw = base64.b64decode(data)
+        if kind == "dpapi":
+            raw = _dpapi(raw, False)
+        return raw.decode("utf-8")
+    except Exception:
+        return ""
+
+
+def _dpapi(data, encrypt):
+    import ctypes
+    from ctypes import wintypes
+
+    class BLOB(ctypes.Structure):
+        _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
+    buf = ctypes.create_string_buffer(data, len(data))
+    inp = BLOB(len(data), ctypes.cast(buf, ctypes.POINTER(ctypes.c_char)))
+    out = BLOB()
+    fn = ctypes.windll.crypt32.CryptProtectData if encrypt else ctypes.windll.crypt32.CryptUnprotectData
+    if not fn(ctypes.byref(inp), None, None, None, None, 0x01, ctypes.byref(out)):
+        raise OSError("DPAPI failed")
+    try:
+        return ctypes.string_at(out.pbData, out.cbData)
+    finally:
+        ctypes.windll.kernel32.LocalFree(out.pbData)
+
+
+def _multipart(fields, files):
+    boundary = "----EmotesDownloader" + os.urandom(8).hex()
+    out = io.BytesIO()
+    for k, v in fields.items():
+        out.write(f'--{boundary}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'.encode("utf-8"))
+    for k, (fname, data, ctype) in files.items():
+        out.write(f'--{boundary}\r\nContent-Disposition: form-data; name="{k}"; filename="{fname}"\r\n'
+                  f"Content-Type: {ctype}\r\n\r\n".encode("utf-8"))
+        out.write(data)
+        out.write(b"\r\n")
+    out.write(f"--{boundary}--\r\n".encode())
+    return out.getvalue(), f"multipart/form-data; boundary={boundary}"
+
+
+def _discord_msg(status, j):
+    code = j.get("code", 0) if isinstance(j, dict) else 0
+    if isinstance(j, dict) and j.get("error_description"):
+        return f"Discord login failed: {j['error_description']}"
+    if code in DISCORD_ERRORS:
+        msg = DISCORD_ERRORS[code]
+    elif status == 401:
+        msg = "Discord says the token is wrong or expired."
+    elif status == 403:
+        msg = "Discord refused this: the bot is missing a permission in that server."
+    else:
+        msg = (j.get("message") if isinstance(j, dict) else None) or f"Discord error {status}"
+    details = []
+
+    def walk(o):
+        if isinstance(o, dict):
+            for k, v in o.items():
+                if k == "_errors":
+                    details.extend(x.get("message", "") for x in v)
+                else:
+                    walk(v)
+    if isinstance(j, dict):
+        walk(j.get("errors") or {})
+    details = [d for d in details if d and d not in msg]
+    return msg + (f" ({'; '.join(details)})" if details else "")
+
+
+def discord_request(method, path, bot=None, bearer=None, json_body=None, form=None, files=None, basic=None,
+                    on_wait=None, timeout=30):
+    """Call the Discord API. Waits out short rate limits, and raises DiscordError with a readable message."""
+    url = path if path.startswith("http") else DISCORD_API + path
+    headers = {"User-Agent": f"DiscordBot (https://github.com/{GITHUB_REPO}, {__version__})",
+               "Accept": "application/json"}
+    if bot:
+        headers["Authorization"] = f"Bot {bot}"
+    elif bearer:
+        headers["Authorization"] = f"Bearer {bearer}"
+    elif basic:
+        headers["Authorization"] = "Basic " + base64.b64encode(f"{basic[0]}:{basic[1]}".encode()).decode()
+    data = None
+    if files is not None:
+        data, ctype = _multipart(form or {}, files)
+        headers["Content-Type"] = ctype
+    elif form is not None:
+        data = urllib.parse.urlencode(form).encode()
+        headers["Content-Type"] = "application/x-www-form-urlencoded"
+    elif json_body is not None:
+        data = json.dumps(json_body).encode()
+        headers["Content-Type"] = "application/json"
+    for attempt in range(4):
+        req = urllib.request.Request(url, data=data, method=method, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                body = r.read()
+                return json.loads(body) if body else None
+        except urllib.error.HTTPError as e:
+            raw = e.read()
+            try:
+                j = json.loads(raw) if raw else {}
+            except ValueError:
+                j = {"message": raw[:200].decode("utf-8", "replace")}
+            if e.code == 429:
+                wait = float(j.get("retry_after") or e.headers.get("Retry-After") or 5)
+                if wait > 90 or attempt == 3:
+                    raise DiscordError(f"Discord is rate-limiting this. Try again in {int(wait) + 1} s.", 429) from None
+                if on_wait:
+                    on_wait(wait)
+                time.sleep(wait + 0.3)
+                continue
+            raise DiscordError(_discord_msg(e.code, j), e.code, j.get("code", 0) if isinstance(j, dict) else 0) from None
+        except urllib.error.URLError as e:
+            raise DiscordError(f"Couldn't reach Discord ({e.reason}). Check your internet connection.") from None
+    raise DiscordError("Discord didn't answer.")
+
+
+def discord_wait_for_code(state, timeout=300):
+    """Tiny local web server that catches Discord's login redirect."""
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    result = {}
+    page = ("<html><body style='background:#0d0f14;color:#eceef4;font-family:Segoe UI,sans-serif;"
+            "display:flex;align-items:center;justify-content:center;height:100vh;margin:0'>"
+            "<div style='text-align:center'><h2>{title}</h2><p style='color:#8b91a5'>{sub}</p></div></body></html>")
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            u = urllib.parse.urlparse(self.path)
+            if u.path != "/callback":
+                self.send_response(404)
+                self.end_headers()
+                return
+            q = urllib.parse.parse_qs(u.query)
+            if q.get("state", [""])[0] != state:
+                result["error"] = "The login didn't match. Please try again."
+            elif "code" in q:
+                result["code"] = q["code"][0]
+            else:
+                result["error"] = q.get("error_description", q.get("error", ["Login was cancelled."]))[0]
+            ok = "code" in result
+            html = page.format(title="Connected to Emotes Downloader ✔" if ok else "Login failed",
+                               sub="You can close this tab and go back to the app." if ok else result.get("error", ""))
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(html.encode("utf-8"))
+
+        def log_message(self, *a):
+            pass
+    try:
+        srv = HTTPServer(("127.0.0.1", DISCORD_PORT), Handler)
+    except OSError:
+        raise DiscordError(f"Port {DISCORD_PORT} is busy. Close other copies of the app and try again.") from None
+    srv.timeout = 1
+    end = time.time() + timeout
+    try:
+        while "code" not in result and "error" not in result and time.time() < end:
+            srv.handle_request()
+    finally:
+        srv.server_close()
+    if "code" in result:
+        return result["code"]
+    raise DiscordError(result.get("error") or "Timed out waiting for the Discord login.")
+
+
+class DiscordLink:
+    """Your own Discord app + bot, linked to your Discord account. Secrets are stored encrypted."""
+
+    def __init__(self, cfg, save):
+        self.cfg, self._save = cfg, save
+        self.d = cfg.setdefault("discord", {})
+        self._guild_cache = {}
+
+    # --- stored values
+    @property
+    def client_id(self):
+        return self.d.get("client_id", "")
+
+    @property
+    def secret(self):
+        return unprotect(self.d.get("secret", ""))
+
+    @property
+    def bot(self):
+        return unprotect(self.d.get("bot", ""))
+
+    @property
+    def user(self):
+        return self.d.get("user") or {}
+
+    @property
+    def bot_user(self):
+        return self.d.get("bot_user") or {}
+
+    def configured(self):
+        return bool(self.client_id and self.secret and self.bot)
+
+    def connected(self):
+        return self.configured() and bool(self.d.get("refresh"))
+
+    def set_creds(self, client_id, secret, bot):
+        client_id = re.sub(r"\D", "", client_id or "")
+        if not client_id or not secret.strip() or not bot.strip():
+            raise DiscordError("Fill in the Application ID, Client Secret and Bot Token first.")
+        self.d.update(client_id=client_id, secret=protect(secret.strip()), bot=protect(bot.strip()))
+        self._save()
+
+    def forget(self, everything=False):
+        for k in ("refresh", "access", "expires", "user"):
+            self.d.pop(k, None)
+        if everything:
+            self.d.clear()
+        self._guild_cache.clear()
+        self._save()
+
+    # --- auth
+    def check_bot(self):
+        me = discord_request("GET", "/users/@me", bot=self.bot)
+        app = discord_request("GET", "/oauth2/applications/@me", bot=self.bot)
+        if str(app.get("id")) != self.client_id:
+            raise DiscordError("The bot token belongs to a different Discord app than this Application ID.")
+        owner = (app.get("owner") or {}).get("id") or ((app.get("team") or {}).get("owner_user_id"))
+        self.d["bot_user"] = dict(id=me.get("id"), name=me.get("username"), avatar=me.get("avatar"))
+        self.d.update(public=bool(app.get("bot_public")), owner_id=str(owner or ""))
+        self._save()
+        return me
+
+    def is_private(self):
+        """Private = only the owner can invite the bot ("Public Bot" turned off in the portal)."""
+        return not self.d.get("public", False)
+
+    def owner_matches(self):
+        uid, owner = str(self.user.get("id") or ""), self.d.get("owner_id") or ""
+        return not uid or not owner or uid == owner
+
+    def portal_bot_url(self):
+        return f"https://discord.com/developers/applications/{self.client_id}/bot"
+
+    def _avatar_bytes(self):
+        """Your GitHub picture (cached on this PC)."""
+        cache = data_dir() / "bot_avatar.png"
+        for url in BOT_AVATAR_URLS:
+            try:
+                raw = http_get(url, timeout=20, site="GitHub")
+                im = Image.open(io.BytesIO(raw)).convert("RGBA")
+                im.thumbnail((512, 512))
+                buf = io.BytesIO()
+                im.save(buf, "PNG")
+                cache.parent.mkdir(parents=True, exist_ok=True)
+                cache.write_bytes(buf.getvalue())
+                return buf.getvalue()
+            except Exception:
+                continue
+        return cache.read_bytes() if cache.exists() else None
+
+    def brand(self, force=False):
+        """Keep the bot's name and picture as ISdook - emotes downloader. Returns what changed."""
+        import hashlib
+        me = discord_request("GET", "/users/@me", bot=self.bot)
+        changed, patch = [], {}
+        if me.get("username") != BOT_NAME:
+            patch["username"] = BOT_NAME
+        pic = self._avatar_bytes()
+        pic_hash = hashlib.sha1(pic).hexdigest() if pic else None
+        if pic and (force or me.get("avatar") is None or me.get("avatar") != self.d.get("avatar_id")
+                    or self.d.get("avatar_src") != pic_hash):
+            patch["avatar"] = "data:image/png;base64," + base64.b64encode(pic).decode()
+        if patch:
+            me = discord_request("PATCH", "/users/@me", bot=self.bot, json_body=patch)
+            changed += [k for k in ("username", "avatar") if k in patch]
+            if "avatar" in patch:
+                self.d.update(avatar_id=me.get("avatar"), avatar_src=pic_hash)
+        if pic and not self.d.get("app_branded"):
+            try:
+                discord_request("PATCH", "/applications/@me", bot=self.bot,
+                                json_body={"icon": "data:image/png;base64," + base64.b64encode(pic).decode(),
+                                           "description": BOT_DESCRIPTION})
+                self.d["app_branded"] = True
+                changed.append("app icon")
+            except DiscordError:
+                pass
+        self.d["bot_user"] = dict(id=me.get("id"), name=me.get("username"), avatar=me.get("avatar"))
+        self._save()
+        return changed
+
+    def login_url(self, state):
+        return "https://discord.com/oauth2/authorize?" + urllib.parse.urlencode({
+            "client_id": self.client_id, "response_type": "code", "redirect_uri": DISCORD_REDIRECT,
+            "scope": "identify guilds", "state": state, "prompt": "none"})
+
+    def invite_url(self, guild_id=None):
+        q = {"client_id": self.client_id, "scope": "bot", "permissions": str(BOT_PERMISSIONS)}
+        if guild_id:
+            q.update(guild_id=str(guild_id), disable_guild_select="true")
+        return "https://discord.com/oauth2/authorize?" + urllib.parse.urlencode(q)
+
+    def _token(self, form):
+        form = dict(form, redirect_uri=DISCORD_REDIRECT)
+        t = discord_request("POST", "/oauth2/token", form=form, basic=(self.client_id, self.secret))
+        self.d.update(access=protect(t["access_token"]), refresh=protect(t.get("refresh_token", "")),
+                      expires=time.time() + int(t.get("expires_in", 3600)) - 60)
+        self._save()
+        return t["access_token"]
+
+    def login(self, open_url):
+        state = os.urandom(12).hex()
+        open_url(self.login_url(state))
+        code = discord_wait_for_code(state)
+        access = self._token({"grant_type": "authorization_code", "code": code})
+        me = discord_request("GET", "/users/@me", bearer=access)
+        self.d["user"] = dict(id=me.get("id"), name=me.get("global_name") or me.get("username"),
+                              avatar=me.get("avatar"))
+        self._save()
+        return self.user
+
+    def access_token(self):
+        if self.d.get("access") and time.time() < float(self.d.get("expires", 0)):
+            return unprotect(self.d["access"])
+        if not self.d.get("refresh"):
+            raise DiscordError("Connect your Discord account first (Settings → Discord).")
+        try:
+            return self._token({"grant_type": "refresh_token", "refresh_token": unprotect(self.d["refresh"])})
+        except DiscordError as e:
+            if e.status in (400, 401):
+                self.forget()
+                raise DiscordError("Your Discord login expired. Connect again in Settings → Discord.") from None
+            raise
+
+    # --- servers
+    def servers(self):
+        """Servers where you can add emotes, and whether the bot is in each one."""
+        mine = discord_request("GET", "/users/@me/guilds", bearer=self.access_token())
+        bot_ids, after = set(), None
+        while True:
+            page = discord_request("GET", "/users/@me/guilds?limit=200" + (f"&after={after}" if after else ""), bot=self.bot)
+            bot_ids |= {g["id"] for g in page}
+            if len(page) < 200:
+                break
+            after = page[-1]["id"]
+        out = []
+        for g in mine:
+            perms = int(g.get("permissions") or 0)
+            can = g.get("owner") or perms & (PERM_ADMIN | PERM_MANAGE_EXPR | PERM_CREATE_EXPR)
+            if not can:
+                continue
+            out.append(dict(id=g["id"], name=g.get("name", "?"), icon=g.get("icon"), bot_in=g["id"] in bot_ids))
+        out.sort(key=lambda g: (not g["bot_in"], g["name"].lower()))
+        return out
+
+    def guild_info(self, gid, fresh=False):
+        """Free emoji / sticker slots in a server (needs the bot to be in it)."""
+        if not fresh and gid in self._guild_cache:
+            return self._guild_cache[gid]
+        g = discord_request("GET", f"/guilds/{gid}", bot=self.bot)
+        tier = int(g.get("premium_tier") or 0)
+        emojis = g.get("emojis") or []
+        stickers = g.get("stickers")
+        if stickers is None:
+            stickers = discord_request("GET", f"/guilds/{gid}/stickers", bot=self.bot) or []
+        lim, slim = EMOJI_LIMITS.get(tier, 50), STICKER_LIMITS.get(tier, 5)
+        info = dict(static=sum(1 for e in emojis if not e.get("animated")), animated=sum(1 for e in emojis if e.get("animated")),
+                    stickers=len(stickers), limit=lim, sticker_limit=slim, tier=tier,
+                    names={e.get("name") for e in emojis})
+        self._guild_cache[gid] = info
+        return info
+
+    def add_emoji(self, gid, name, data, ext, on_wait=None):
+        uri = f"data:image/{'gif' if ext == 'gif' else 'png'};base64," + base64.b64encode(data).decode()
+        e = discord_request("POST", f"/guilds/{gid}/emojis", bot=self.bot, json_body={"name": name, "image": uri},
+                            on_wait=on_wait)
+        self._guild_cache.pop(gid, None)
+        return e
+
+    def add_sticker(self, gid, name, data, ext, on_wait=None, tags="grinning"):
+        name = name[:30] if len(name) >= 2 else name + "_"
+        files = {"file": (f"{name}.{ext}", data, "image/gif" if ext == "gif" else "image/png")}
+        st = discord_request("POST", f"/guilds/{gid}/stickers", bot=self.bot, files=files,
+                             form={"name": name, "description": "", "tags": tags}, on_wait=on_wait)
+        self._guild_cache.pop(gid, None)
+        return st
+
+
+def fetch_guild_icon(gid, icon, size=64):
+    if not icon:
+        return None
+    return Image.open(io.BytesIO(http_get(f"https://cdn.discordapp.com/icons/{gid}/{icon}.png?size={size}",
+                                          timeout=15, site="Discord"))).convert("RGBA")
+
+
 def make_emote(frames, name, out_dir, mode="none", cols=1, rows=1, tile=128,
                fit="auto", original=None, target="emoji"):
     """Process and save. target="sticker" makes one 320x320 Discord sticker (max 512 KB) in a Stickers folder.
@@ -708,6 +1169,7 @@ def make_emote(frames, name, out_dir, mode="none", cols=1, rows=1, tile=128,
     sticker = target == "sticker"
     if sticker:
         mode, tile = "none", STICKER_SIZE
+        frames = trim_frames(frames, STICKER_MAX_MS)
     w, h = frames[0][0].size
     cols, rows = plan_grid(w, h, mode, cols, rows)
     count = cols * rows
@@ -1117,6 +1579,10 @@ def draw_icon(name, color="#ffffff", size=16):
         d.rectangle((S * .44, S * .1, S * .92, S * .54), fill=(0, 0, 0, 0))
         d.line((S * .42, S * .56, S * .86, S * .12), fill=c, width=w)
         d.line((S * .56, S * .12, S * .88, S * .12, S * .88, S * .44), fill=c, width=w)
+    elif name == "send":
+        d.polygon([(S * .08, S * .46), (S * .92, S * .1), (S * .62, S * .9), (S * .48, S * .58)], fill=c)
+        d.polygon([(S * .48, S * .58), (S * .92, S * .1), (S * .3, S * .52)], fill=(0, 0, 0, 0))
+        d.line((S * .48, S * .58, S * .9, S * .12), fill=c, width=max(2, w // 2))
     elif name == "refresh":
         d.arc((S * .14, S * .14, S * .86, S * .86), start=40, end=330, fill=c, width=w)
         d.polygon([(S * .64, S * .06), (S * .92, S * .3), (S * .6, S * .36)], fill=c)
@@ -1132,6 +1598,7 @@ C = dict(
     text="#eceef4", muted="#8b91a5", faint="#5c6275",
     accent="#7c5cff", accent_hover="#6847f5", blue="#3d8bff", blue_hover="#2f78e8",
     good="#34c77b", bad="#ff5d6e", warn="#f5b14c", discord="#313338",
+    blurple="#5865F2", blurple_hover="#4752C4",
 )
 FITS = {"Fill": "auto", "Stretch": "stretch", "Bars": "contain", "Crop": "cover"}
 FIT_HELP = {"auto": "Each piece is filled edge to edge, like a normal emote.",
@@ -1224,6 +1691,7 @@ def run_gui(start_hidden=False):
             self.browse_win = None
             self.thumb_cache = {}
             self.dlq = queue.Queue()
+            self.discord = DiscordLink(self.cfg, lambda: save_config(self.cfg))
             self._last_clip = None
             self.clip_ref = None
             self.F = lambda size, bold=False: ctk.CTkFont(family=FAMILY, size=size,
@@ -1250,7 +1718,8 @@ def run_gui(start_hidden=False):
                                 border_color=C["border"], **kw)
 
         def label(self, parent, text, size=13, color="text", bold=False, **kw):
-            return ctk.CTkLabel(parent, text=text, font=self.F(size, bold), text_color=C[color], **kw)
+            kw.setdefault("text_color", C[color])
+            return ctk.CTkLabel(parent, text=text, font=self.F(size, bold), **kw)
 
         def section(self, parent, text):
             return ctk.CTkLabel(parent, text=text.upper(), font=self.F(11, True), text_color=C["muted"], anchor="w")
@@ -1259,10 +1728,11 @@ def run_gui(start_hidden=False):
             styles = {
                 "accent": dict(fg_color=C["accent"], hover_color=C["accent_hover"], text_color="white"),
                 "blue": dict(fg_color=C["blue"], hover_color=C["blue_hover"], text_color="white"),
+                "discord": dict(fg_color=C["blurple"], hover_color=C["blurple_hover"], text_color="white"),
                 "ghost": dict(fg_color=C["card_hi"], hover_color=C["border"], text_color=C["text"]),
                 "flat": dict(fg_color="transparent", hover_color=C["card_hi"], text_color=C["muted"]),
             }
-            opts = dict(corner_radius=10, height=36, font=self.F(13, kind in ("accent", "blue")))
+            opts = dict(corner_radius=10, height=36, font=self.F(13, kind in ("accent", "blue", "discord")))
             opts.update(styles[kind])
             opts.update(kw)
             return ctk.CTkButton(parent, text=text, command=cmd, **opts)
@@ -1466,11 +1936,14 @@ def run_gui(start_hidden=False):
             self.save_btn = self.button(ctl, "Save", lambda: self.on_save(False), "accent",
                                         height=48, corner_radius=12, font=self.F(15, True),
                                         image=self.ico("download", "#ffffff", 18), compound="left")
-            self.save_btn.grid(row=9, column=0, pady=(20, 0), **pad)
+            self.save_btn.grid(row=9, column=0, pady=(16, 0), **pad)
+            self.send_btn = self.button(ctl, "Send to Discord", self.on_send_discord, "discord", height=40,
+                                        image=self.ico("send", "#ffffff", 16), compound="left")
+            self.send_btn.grid(row=10, column=0, pady=(8, 0), **pad)
             self.save_all_btn = self.button(ctl, "Save all", lambda: self.on_save(True), "ghost", height=38)
 
             st = ctk.CTkFrame(ctl, fg_color="transparent")
-            st.grid(row=11, column=0, pady=(14, 0), **pad)
+            st.grid(row=12, column=0, pady=(14, 0), **pad)
             st.grid_columnconfigure(1, weight=1)
             self.label(st, "Save to", 12, "muted").grid(row=0, column=0, padx=(0, 8))
             self.save_menu = ctk.CTkOptionMenu(
@@ -1481,12 +1954,12 @@ def run_gui(start_hidden=False):
             self.save_menu.grid(row=0, column=1, sticky="ew")
             self.path_lbl = ctk.CTkLabel(ctl, text="", font=self.F(11), text_color=C["faint"], anchor="w",
                                          justify="left", wraplength=280, cursor="hand2")
-            self.path_lbl.grid(row=12, column=0, pady=(4, 0), **pad)
+            self.path_lbl.grid(row=13, column=0, pady=(4, 0), **pad)
             self.path_lbl.bind("<Button-1>", lambda _e: self.on_open_out(True))
 
             self.button(ctl, "Open folder", lambda: self.on_open_out(), "ghost", height=38,
-                        image=self.ico("folder", C["text"], 15), compound="left").grid(row=13, column=0, pady=(14, 16), **pad)
-            ctl.grid_rowconfigure(14, weight=1)
+                        image=self.ico("folder", C["text"], 15), compound="left").grid(row=14, column=0, pady=(14, 16), **pad)
+            ctl.grid_rowconfigure(15, weight=1)
 
             # ---- status bar
             sb = ctk.CTkFrame(r, fg_color="transparent")
@@ -1591,6 +2064,8 @@ def run_gui(start_hidden=False):
         def _set_buttons(self):
             self.load_btn.configure(state="disabled" if self.busy else "normal")
             self.save_btn.configure(state="disabled" if self.busy or self.current is None else "normal")
+            if hasattr(self, "send_btn"):
+                self.send_btn.configure(state="disabled" if self.busy or self.current is None else "normal")
             self.save_all_btn.configure(state="disabled" if self.busy else "normal")
 
         def settings(self):
@@ -1743,7 +2218,7 @@ def run_gui(start_hidden=False):
             else:
                 self.em_empty.place(relx=0.5, rely=0.45, anchor="center")
             if n > 1:
-                self.save_all_btn.grid(row=10, column=0, padx=18, pady=(8, 0), sticky="ew")
+                self.save_all_btn.grid(row=11, column=0, padx=18, pady=(8, 0), sticky="ew")
             else:
                 self.save_all_btn.grid_forget()
             self.all_var.set(False)
@@ -1960,7 +2435,7 @@ def run_gui(start_hidden=False):
             self._sync_save_to()
             self.say(f"Emotes will be saved to {self.out_dir()}", "ok")
 
-        def on_save(self, batch):
+        def on_save(self, batch, after=None):
             if batch:
                 targets = self._checked() or list(self.items)
             elif self.current is not None:
@@ -2000,6 +2475,10 @@ def run_gui(start_hidden=False):
                     what = f"{len(res['files'])} pieces" if len(res["files"]) > 1 else res["files"][0][0].name
                     warn = "WARNING" in res["note"]
                     self.say(f"Saved {what} · largest {big / 1024:.0f} KB · {res['note']}", "warn" if warn else "ok")
+                    if after:
+                        after(res)
+                    elif self.discord.connected() and self.cfg.get("discord_after_save", True):
+                        self.open_send_panel(self._payload_from_result(res, s["target"]))
                 elif ok:
                     self.say(f"Saved {len(ok)} emotes to {out}" + (f" · {failed} failed (see Log)" if failed else ""),
                              "warn" if failed else "ok")
@@ -2073,7 +2552,7 @@ def run_gui(start_hidden=False):
             if getattr(self, "settings_win", None) is not None and self.settings_win.winfo_exists():
                 self.settings_win.lift()
                 return
-            top = self.dialog("Settings", 780, 560)
+            top = self.dialog("Settings", 820, 620)
             self.settings_win = top
             top.grid_columnconfigure(1, weight=1)
             top.grid_rowconfigure(0, weight=1)
@@ -2090,7 +2569,8 @@ def run_gui(start_hidden=False):
             tx.pack(side="left")
             self.label(tx, "Settings", 15, bold=True, anchor="w").pack(anchor="w")
             self.label(tx, f"v{__version__} · {KIND_LABEL[install_kind()]}", 11, "faint", anchor="w").pack(anchor="w")
-            body = ctk.CTkFrame(top, fg_color="transparent")
+            body = ctk.CTkScrollableFrame(top, fg_color="transparent", scrollbar_button_color=C["card_hi"],
+                                          scrollbar_button_hover_color=C["border"])
             body.grid(row=0, column=1, sticky="nsew", padx=28, pady=(22, 0))
             body.grid_columnconfigure(0, weight=1)
             foot = ctk.CTkFrame(top, fg_color="transparent")
@@ -2118,16 +2598,17 @@ def run_gui(start_hidden=False):
                 g._rows = 0
                 return g, row + 1
 
-            def line(g, title, desc, control_factory):
+            def line(g, title, desc, control_factory, wrap=280, color=None):
                 if g._rows:
                     ctk.CTkFrame(g, fg_color=C["border"], height=1, corner_radius=0).grid(
                         row=g._rows * 2 - 1, column=0, columnspan=2, sticky="ew", padx=16)
                 r_ = g._rows * 2
                 txt = ctk.CTkFrame(g, fg_color="transparent")
                 txt.grid(row=r_, column=0, sticky="ew", padx=(16, 12), pady=12)
-                self.label(txt, title, 13, anchor="w").pack(anchor="w")
+                self.label(txt, title, 13, anchor="w", text_color=color or C["text"]).pack(anchor="w")
                 if desc:
-                    self.label(txt, desc, 11, "muted", anchor="w", justify="left", wraplength=280).pack(anchor="w", pady=(1, 0))
+                    self.label(txt, desc, 11, "muted", anchor="w", justify="left", wraplength=wrap,
+                               text_color=color or C["muted"]).pack(anchor="w", pady=(1, 0))
                 ctl = control_factory(g)
                 ctl.grid(row=r_, column=1, sticky="e", padx=16)
                 g._rows += 1
@@ -2244,8 +2725,134 @@ def run_gui(start_hidden=False):
                     return self.button(gg, "Reset", do, "ghost", width=90, height=32, text_color=C["bad"])
                 line(g, "Reset all settings", "Puts every option back to how it was on first start.", reset)
 
+            def page_discord():
+                clear()
+                head("Discord", "Send emotes and stickers straight to your servers with your own private bot.")
+                dl = self.discord
+                g, row = group(2, "Your account")
+                if dl.connected():
+                    def disconnect():
+                        dl.forget()
+                        self.toast("Disconnected from Discord", "Your app details are kept, so reconnecting is one click.", "info")
+                        page_discord()
+                    line(g, f"Connected as {dl.user.get('name', '?')}",
+                         f"Bot: {dl.bot_user.get('name', '?')} · your tokens are stored encrypted on this PC",
+                         lambda gg: self.button(gg, "Disconnect", disconnect, "ghost", width=110, height=32,
+                                                text_color=C["bad"]))
+                    if dl.is_private() and dl.owner_matches():
+                        line(g, "Private bot", "Only you can add this bot to servers. Its name and picture are kept as "
+                                               f"“{BOT_NAME}”.",
+                             lambda gg: ctk.CTkLabel(gg, text="  Private", image=self.ico("check", C["good"], 14),
+                                                     compound="left", font=self.F(12, True), text_color=C["good"]))
+                    else:
+                        why = ("Your bot is set to Public, so anyone with its link could add it. Turn off “Public Bot” "
+                               "on the Bot page, then press Check again.") if not dl.is_private() else (
+                              "This Discord app belongs to a different account than the one you logged in with.")
+
+                        def recheck():
+                            def job():
+                                try:
+                                    dl.check_bot()
+                                except Exception:
+                                    pass
+                                self.ui(page_discord)
+                            threading.Thread(target=job, daemon=True).start()
+
+                        def fix(gg):
+                            f = ctk.CTkFrame(gg, fg_color="transparent")
+                            self.button(f, "Fix", lambda: __import__("webbrowser").open(dl.portal_bot_url()), "ghost",
+                                        width=70, height=32, image=self.ico("external", C["text"], 13),
+                                        compound="left").pack(side="left", padx=(0, 6))
+                            self.button(f, "Check again", recheck, "ghost", width=100, height=32).pack(side="left")
+                            return f
+                        line(g, "Not private", why, fix, wrap=230, color=C["bad"])
+                    line(g, "Invite the bot to a server", "It only asks for permission to add emojis and stickers.",
+                         lambda gg: self.button(gg, "Invite bot", lambda: __import__("webbrowser").open(dl.invite_url()),
+                                                "ghost", width=110, height=32, image=self.ico("external", C["text"], 13),
+                                                compound="left"))
+                    line(g, "Open “Send to Discord” after saving", "Shows your servers as soon as an emote or sticker is saved.",
+                         switch("discord_after_save", value=self.cfg.get("discord_after_save", True)))
+                else:
+                    line(g, "Not connected yet", "Do the steps below once. It takes about two minutes.",
+                         lambda gg: ctk.CTkFrame(gg, width=1, height=1, fg_color="transparent"))
+
+                g, row = group(row, "Setup: your own Discord app")
+                line(g, "1. Create a Discord app",
+                     "In the Developer Portal press New Application (any name). Then open the Bot page: turn OFF "
+                     "“Public Bot” so only you can add it, press Reset Token and copy the token. The app sets the bot's "
+                     f"name and picture to “{BOT_NAME}” by itself.",
+                     lambda gg: self.button(gg, "Open portal",
+                                            lambda: __import__("webbrowser").open("https://discord.com/developers/applications"),
+                                            "ghost", width=120, height=32, image=self.ico("external", C["text"], 13),
+                                            compound="left"), wrap=220)
+
+                def copy_redirect():
+                    self.root.clipboard_clear()
+                    self.root.clipboard_append(DISCORD_REDIRECT)
+                    status.configure(text="Redirect copied.", text_color=C["good"])
+                line(g, "2. Add this redirect", f"On the OAuth2 page, under Redirects, add:\n{DISCORD_REDIRECT}",
+                     lambda gg: self.button(gg, "Copy", copy_redirect, "ghost", width=90, height=32), wrap=220)
+
+                def entry(value, secret=False):
+                    def make(gg):
+                        e = ctk.CTkEntry(gg, width=200, height=32, corner_radius=8, border_width=1,
+                                         border_color=C["border"], fg_color=C["field"], text_color=C["text"],
+                                         font=self.F(12), show="•" if secret else "")
+                        if value:
+                            e.insert(0, value)
+                        return e
+                    return make
+                e_id = line(g, "3. Application ID", "OAuth2 page → Client ID", entry(dl.client_id), wrap=220)
+                e_sec = line(g, "Client Secret", "OAuth2 page → Client Secret → Reset Secret", entry(dl.secret, True), wrap=220)
+                e_bot = line(g, "Bot Token", "Bot page → Reset Token", entry(dl.bot, True), wrap=220)
+                status = self.label(body, "", 12, anchor="w", justify="left", wraplength=520)
+                status.grid(row=row, column=0, sticky="ew", pady=(0, 8))
+                cbtn = self.button(body, "Connect my Discord account" if not dl.connected() else "Save and reconnect",
+                                   lambda: connect(), "discord", height=42, image=self.ico("send", "#ffffff", 16),
+                                   compound="left")
+                cbtn.grid(row=row + 1, column=0, sticky="ew", pady=(0, 16))
+
+                def connect():
+                    try:
+                        dl.set_creds(e_id.get(), e_sec.get(), e_bot.get())
+                    except DiscordError as ex:
+                        status.configure(text=str(ex), text_color=C["bad"])
+                        return
+                    cbtn.configure(state="disabled", text="Waiting for you in the browser…")
+                    status.configure(text="Checking the bot, then opening Discord's login page in your browser…",
+                                     text_color=C["muted"])
+
+                    def job():
+                        try:
+                            dl.check_bot()
+                            user = dl.login(__import__("webbrowser").open)
+                            err = None
+                        except Exception as ex:  # noqa
+                            user, err = None, ex
+                        if not err:
+                            try:
+                                dl.brand()
+                            except Exception as ex:  # noqa (name changes are rate-limited by Discord; retried on next start)
+                                self.log_lines.append(f"Bot name/picture not updated yet: {ex}")
+                            # straight to adding the bot to your server
+                            __import__("webbrowser").open(dl.invite_url())
+
+                        def done():
+                            if not top.winfo_exists():
+                                return
+                            if err:
+                                cbtn.configure(state="normal", text="Try again")
+                                status.configure(text=str(err), text_color=C["bad"])
+                                return
+                            self.toast("Discord connected", f"Signed in as {user.get('name')}. Now pick a server "
+                                                            "for the bot in your browser.", "ok")
+                            page_discord()
+                        self.ui(done)
+                    threading.Thread(target=job, daemon=True).start()
+
             pages = {"General": ("gear", page_general), "Saving": ("folder", page_saving),
-                     "Updates": ("refresh", page_updates), "About": ("external", page_about)}
+                     "Discord": ("send", page_discord), "Updates": ("refresh", page_updates),
+                     "About": ("external", page_about)}
 
             def go(name):
                 for n_, b_ in navs.items():
@@ -2519,7 +3126,7 @@ def run_gui(start_hidden=False):
             self.cv_preset_help.grid(row=4, column=0, pady=(6, 0), **pad)
 
             def seg_row(row, title, values, key, default):
-                self.section(opt, title).grid(row=row, column=0, pady=(14, 6), **pad)
+                self.section(opt, title).grid(row=row, column=0, pady=(10, 5), **pad)
                 sg = self.segmented(opt, values, lambda _v: self._conv_changed())
                 sg.set(cfg.get(key, default))
                 sg.grid(row=row + 1, column=0, **pad)
@@ -2530,7 +3137,7 @@ def run_gui(start_hidden=False):
             self.cv_fit = seg_row(7, "Fit", list(FITS), "fit", "Fill")
             self.cv_scale = seg_row(9, "Scaling", ["Smooth", "Pixel art"], "scale", "Smooth")
             self.cv_fps = seg_row(11, "Frame rate", ["Keep", "30", "20", "15", "10"], "fps", "Keep")
-            self.section(opt, "Colours").grid(row=13, column=0, pady=(14, 6), **pad)
+            self.section(opt, "Colours").grid(row=13, column=0, pady=(10, 5), **pad)
             cr = ctk.CTkFrame(opt, fg_color="transparent")
             cr.grid(row=14, column=0, **pad)
             cr.grid_columnconfigure(0, weight=1)
@@ -2543,14 +3150,20 @@ def run_gui(start_hidden=False):
             self.cv_colors.grid(row=0, column=0, sticky="ew")
             self.cv_colors_lbl = self.label(cr, str(int(self.cv_colors.get())), 12, bold=True, width=36)
             self.cv_colors_lbl.grid(row=0, column=1, padx=(8, 0))
-            self.conv_btn = self.button(opt, "Convert", self.conv_run, "accent", height=46, corner_radius=12,
+            cb = ctk.CTkFrame(opt, fg_color="transparent")
+            cb.grid(row=15, column=0, pady=(12, 0), **pad)
+            cb.grid_columnconfigure(0, weight=1)
+            self.conv_btn = self.button(cb, "Convert", self.conv_run, "accent", height=46, corner_radius=12,
                                         font=self.F(15, True), image=self.ico("download", "#ffffff", 18), compound="left")
-            self.conv_btn.grid(row=15, column=0, pady=(20, 0), **pad)
+            self.conv_btn.grid(row=0, column=0, sticky="ew")
             self.conv_dest = ctk.CTkLabel(opt, text="", font=self.F(11), text_color=C["faint"], anchor="w",
                                           justify="left", wraplength=290, cursor="hand2")
-            self.conv_dest.grid(row=16, column=0, pady=(6, 0), **pad)
+            self.conv_send = self.button(cb, "Send", self.conv_send_discord, "discord", width=96, height=46,
+                                         corner_radius=12, image=self.ico("send", "#ffffff", 15), compound="left")
+            self.conv_send.grid(row=0, column=1, padx=(8, 0))
+            self.conv_dest.grid(row=17, column=0, pady=(6, 12), **pad)
             self.conv_dest.bind("<Button-1>", lambda _e: self._conv_open_out())
-            opt.grid_rowconfigure(17, weight=1)
+            opt.grid_rowconfigure(18, weight=1)
             self.cv_preset.set(cfg.get("preset", "Emoji"))
             self._conv_preset(self.cv_preset.get(), init=True)
             self._conv_refresh_list()
@@ -2594,7 +3207,8 @@ def run_gui(start_hidden=False):
             return dict(width=num(self.cv_w, 128), height=num(self.cv_h, 128),
                         fmt={"Auto": "auto", "GIF": "gif", "PNG": "png"}.get(self.cv_fmt.get(), "auto"),
                         fit=FITS.get(self.cv_fit.get(), "auto"), pixel=self.cv_scale.get() == "Pixel art",
-                        colors=int(self.cv_colors.get()), fps=None if fps == "Keep" else int(fps), limit_kb=kb)
+                        colors=int(self.cv_colors.get()), fps=None if fps == "Keep" else int(fps), limit_kb=kb,
+                        max_ms=STICKER_MAX_MS if self.cv_preset.get() == "Sticker" else None)
 
         def _conv_changed(self, custom=False):
             if getattr(self, "_conv_lock", False) or not hasattr(self, "cv_colors_lbl"):
@@ -2689,7 +3303,7 @@ def run_gui(start_hidden=False):
                 self.conv_empty.place_forget()
             else:
                 self.conv_empty.place(relx=0.5, rely=0.45, anchor="center")
-            self.conv_btn.configure(text=f" Convert {n} file{'s' if n != 1 else ''}" if n > 1 else " Convert",
+            self.conv_btn.configure(text=f" Convert {n}" if n > 1 else " Convert",
                                     state="normal" if n else "disabled")
             self.conv_dest.configure(text=f"  {self.conv_out_dir()}", image=self.ico("folder", C["faint"], 13), compound="left")
 
@@ -2863,6 +3477,384 @@ def run_gui(start_hidden=False):
                     self.ui(lambda: setattr(self, "_conv_running", False))
                 self.ui(lambda: done(r_))
             threading.Thread(target=run, daemon=True).start()
+
+
+        # ================= Send to Discord =================
+        def _payload_from_result(self, res, target):
+            items = [(p.stem, p.read_bytes(), p.suffix.lstrip(".").lower()) for p, _ in res["files"]]
+            base = res["files"][0][0].stem if len(items) == 1 else re.sub(r"\d+$", "", res["files"][0][0].stem)
+            return dict(kind="sticker" if target == "sticker" else "emoji", title=base, items=items)
+
+        def _need_discord(self):
+            if self.discord.connected():
+                return False
+            self.text_dialog("Send to Discord", "Connect Discord first",
+                             "Takes about two minutes, and you only do it once.",
+                             "Emotes Downloader adds emotes and stickers with your own private Discord bot.\n\n"
+                             "In Settings → Discord you create a free Discord app, paste in its details, "
+                             "and log in with your Discord account. Then every emote you save can go straight "
+                             "to your servers.",
+                             [("Not now", "ghost", None), ("Open Discord settings", "discord",
+                                                           lambda: self.open_settings("Discord"))])
+            return True
+
+        def on_send_discord(self):
+            if self.current is None or self._need_discord():
+                return
+            target = self.settings()["target"]
+            self.on_save(False, after=lambda res: self.open_send_panel(self._payload_from_result(res, target)))
+
+        def conv_send_discord(self):
+            if self.conv_sel is None or self.conv_sel >= len(self.conv_items):
+                self.say("Select a file in the list first.", "warn")
+                return
+            if self._need_discord():
+                return
+            it = self.conv_items[self.conv_sel]
+            res = it.get("result")
+            if res is None:
+                self.say("Wait for the preview to finish converting, then press Send again.", "warn")
+                self._conv_preview()
+                return
+            kind = "sticker" if self.cv_preset.get() == "Sticker" else "emoji"
+            kb = len(res["data"]) / 1024
+            if kind == "sticker" and (res["size"] != (320, 320) or kb > 512):
+                self.say("Stickers must be exactly 320×320 and at most 512 KB. Choose the Sticker preset.", "err")
+                return
+            if kind == "emoji" and kb > 256:
+                self.say("Emojis must be at most 256 KB. Lower the colours or frame rate, or choose the Emoji preset.", "err")
+                return
+            name = sanitize_name(Path(it["path"]).stem)
+            self.open_send_panel(dict(kind=kind, title=name, items=[(name, res["data"], res["ext"])]))
+
+        def _guild_icon(self, g, dim=False, size=40):
+            key = (g["id"], dim)
+            cache = self.__dict__.setdefault("_gicon", {})
+            if key in cache:
+                return cache[key]
+            im = self._gicon_raw.get(g["id"]) if hasattr(self, "_gicon_raw") else None
+            if im is None:  # initials on a circle until the real icon arrives
+                im = Image.new("RGBA", (128, 128), (0, 0, 0, 0))
+                d = ImageDraw.Draw(im)
+                d.ellipse((0, 0, 127, 127), fill=(58, 62, 80, 255))
+                initials = "".join(w[0] for w in re.findall(r"\w+", g["name"])[:2]).upper() or "?"
+                try:
+                    from PIL import ImageFont
+                    font = ImageFont.load_default(size=46)
+                except Exception:
+                    font = None
+                d.text((64, 64), initials, fill=(235, 237, 244, 255), anchor="mm", font=font)
+            else:
+                im = im.resize((128, 128), LANCZOS)
+                mask = Image.new("L", (128, 128), 0)
+                ImageDraw.Draw(mask).ellipse((0, 0, 127, 127), fill=255)
+                out = Image.new("RGBA", (128, 128), (0, 0, 0, 0))
+                out.paste(im, (0, 0), mask)
+                im = out
+            if dim:
+                gray = im.convert("LA").convert("RGBA")
+                gray.putalpha(im.getchannel("A").point(lambda a: a * 0.45))
+                im = gray
+            img = ctk.CTkImage(im, im, size=(size, size))
+            if hasattr(self, "_gicon_raw") and g["id"] in self._gicon_raw:
+                cache[key] = img
+            return img
+
+        def open_send_panel(self, payload):
+            if self._need_discord():
+                return
+            if getattr(self, "send_win", None) is not None and self.send_win.winfo_exists():
+                self.send_win.destroy()
+            dl = self.discord
+            kind, items = payload["kind"], payload["items"]
+            n = len(items)
+            animated = sum(1 for _, _, ext in items if ext == "gif")
+            word = ("sticker" if kind == "sticker" else "emoji") + ("s" if n > 1 and kind == "sticker" else "")
+            top = self.dialog("Send to Discord", 680, 760)
+            self.send_win = top
+            self._gicon_raw = getattr(self, "_gicon_raw", {})
+            top.grid_rowconfigure(3, weight=1)
+            st = dict(sel=None, servers=[], rows={}, sending=False)
+
+            hd = ctk.CTkFrame(top, fg_color="transparent")
+            hd.grid(row=0, column=0, sticky="ew", padx=24, pady=(20, 6))
+            hd.grid_columnconfigure(1, weight=1)
+            ctk.CTkLabel(hd, text="", image=self.ico("send", C["blurple"], 26)).grid(row=0, column=0, rowspan=2, padx=(0, 12))
+            self.label(hd, "Send to Discord", 18, bold=True, anchor="w").grid(row=0, column=1, sticky="w")
+            self.label(hd, f"{payload['title']}  ·  {n} {word}" + (f" ({animated} animated)" if animated and kind == "emoji" else ""),
+                       12, "muted", anchor="w").grid(row=1, column=1, sticky="w")
+
+            pv = ctk.CTkFrame(top, fg_color=C["discord"], corner_radius=12)
+            pv.grid(row=1, column=0, sticky="ew", padx=24, pady=(6, 10))
+            strip = ctk.CTkFrame(pv, fg_color="transparent")
+            strip.pack(padx=12, pady=10, anchor="w")
+            self._send_thumbs = []
+            for name, data, ext in items[:8]:
+                try:
+                    im = Image.open(io.BytesIO(data)).convert("RGBA")
+                    side = 64 if kind == "sticker" else 44
+                    im.thumbnail((side, side))
+                    ci = ctk.CTkImage(im, im, size=im.size)
+                    self._send_thumbs.append(ci)
+                    cell = ctk.CTkFrame(strip, fg_color="transparent")
+                    cell.pack(side="left", padx=(0, 8))
+                    ctk.CTkLabel(cell, text="", image=ci).pack()
+                    self.label(cell, f":{name}:" if kind == "emoji" else name, 10, "muted").pack()
+                except Exception:
+                    pass
+            if n > 8:
+                self.label(strip, f"+{n - 8} more", 12, "muted").pack(side="left", padx=8)
+
+            acc = ctk.CTkFrame(top, fg_color="transparent")
+            acc.grid(row=2, column=0, sticky="ew", padx=24)
+            self.label(acc, "CHOOSE A SERVER", 11, "muted", bold=True).pack(side="left")
+            self.label(acc, f"   signed in as {dl.user.get('name', '?')}", 11, "faint").pack(side="left")
+            self.button(acc, "Refresh", lambda: load(fresh=True), "flat", width=90, height=28,
+                        image=self.ico("refresh", C["muted"], 13), compound="left").pack(side="right")
+
+            lst = ctk.CTkScrollableFrame(top, fg_color=C["card"], corner_radius=14, border_width=1, border_color=C["border"],
+                                         scrollbar_button_color=C["card_hi"], scrollbar_button_hover_color=C["border"])
+            lst.grid(row=3, column=0, sticky="nsew", padx=24, pady=(8, 8))
+            lst.grid_columnconfigure(0, weight=1)
+            warn = self.label(top, "", 12, "bad", anchor="w", justify="left", wraplength=620)
+            warn.grid(row=4, column=0, sticky="ew", padx=26)
+
+            res_box = ctk.CTkScrollableFrame(top, fg_color=C["field"], corner_radius=12, height=96,
+                                             scrollbar_button_color=C["card_hi"], scrollbar_button_hover_color=C["border"])
+            res_box.grid(row=5, column=0, sticky="ew", padx=24, pady=(6, 8))
+            try:
+                res_box._scrollbar.configure(height=10)   # CTk's default 200px scrollbar would stretch the box
+            except Exception:
+                pass
+            self.label(res_box, "Results will show here.", 12, "faint", anchor="w").pack(anchor="w", padx=6, pady=4)
+
+            ft = ctk.CTkFrame(top, fg_color="transparent")
+            ft.grid(row=6, column=0, sticky="ew", padx=24, pady=(6, 18))
+            send_txt = f"Send {'sticker' if kind == 'sticker' else ('emote' if n == 1 else f'{n} emotes')}"
+            send = self.button(ft, send_txt, lambda: do_send(), "discord", width=200, height=42,
+                               image=self.ico("send", "#ffffff", 16), compound="left")
+            send.pack(side="right")
+            send.configure(state="disabled")
+            self.button(ft, "Close", top.destroy, "ghost", width=100, height=42).pack(side="right", padx=(0, 8))
+
+            def result_line(text, ok=None):
+                if getattr(res_box, "_first", True):
+                    for w in res_box.winfo_children():
+                        w.destroy()
+                    res_box._first = False
+                color = C["good"] if ok else C["bad"] if ok is False else C["muted"]
+                icon = self.ico("check", C["good"], 14) if ok else self.ico("close", C["bad"], 13) if ok is False else None
+                lb = ctk.CTkLabel(res_box, text=("  " if icon else "") + text, image=icon, compound="left",
+                                  font=self.F(12, ok is not None), text_color=color, anchor="w", justify="left",
+                                  wraplength=580)
+                lb.pack(anchor="w", padx=6, pady=2)
+                res_box.after(30, lambda: res_box._parent_canvas.yview_moveto(1.0))
+                return lb
+
+            def slots_text(info):
+                if kind == "sticker":
+                    return f"Stickers {info['stickers']}/{info['sticker_limit']}"
+                return (f"Emoji {info['static']}/{info['limit']}  ·  Animated {info['animated']}/{info['limit']}"
+                        f"  ·  Boost level {info['tier']}")
+
+            def check_room(gid):
+                info = dl._guild_cache.get(gid)
+                if not info:
+                    warn.configure(text="")
+                    return
+                if kind == "sticker":
+                    free = info["sticker_limit"] - info["stickers"]
+                    msg = "" if free >= 1 else f"This server has no free sticker slots ({info['stickers']}/{info['sticker_limit']})."
+                else:
+                    need_a, need_s = animated, n - animated
+                    free_a, free_s = info["limit"] - info["animated"], info["limit"] - info["static"]
+                    bits = []
+                    if need_a > free_a:
+                        bits.append(f"animated: needs {need_a}, only {max(0, free_a)} free")
+                    if need_s > free_s:
+                        bits.append(f"still: needs {need_s}, only {max(0, free_s)} free")
+                    msg = ("Not enough emoji slots here (" + "; ".join(bits) + ").") if bits else ""
+                warn.configure(text=msg)
+
+            def select(gid):
+                if st["sending"]:
+                    return
+                st["sel"] = gid
+                for g_id, r in st["rows"].items():
+                    if r["bot_in"]:
+                        r["frame"].configure(border_color=C["blurple"] if g_id == gid else C["border"],
+                                             border_width=2 if g_id == gid else 1)
+                        r["dot"].configure(fg_color=C["blurple"] if g_id == gid else C["card"])
+                send.configure(state="normal")
+                check_room(gid)
+
+            def fill_slots(g, sub):
+                def job():
+                    try:
+                        info, err = dl.guild_info(g["id"]), None
+                    except Exception as e:  # noqa
+                        info, err = None, e
+
+                    def done():
+                        if not sub.winfo_exists():
+                            return
+                        if err:
+                            sub.configure(text=str(err), text_color=C["bad"])
+                        else:
+                            sub.configure(text=slots_text(info), text_color=C["muted"])
+                            if st["sel"] == g["id"]:
+                                check_room(g["id"])
+                    self.ui(done)
+                threading.Thread(target=job, daemon=True).start()
+
+            def fetch_icon(g):
+                if g["id"] in self._gicon_raw or not g.get("icon"):
+                    return
+
+                def job():
+                    try:
+                        im = fetch_guild_icon(g["id"], g["icon"], 64)
+                    except Exception:
+                        return
+                    self._gicon_raw[g["id"]] = im
+
+                    def done():
+                        r = st["rows"].get(g["id"])
+                        if r and r["icon"].winfo_exists():
+                            r["icon"].configure(image=self._guild_icon(g, dim=not g["bot_in"]))
+                    self.ui(done)
+                threading.Thread(target=job, daemon=True).start()
+
+            def build(servers):
+                for w in lst.winfo_children():
+                    w.destroy()
+                st["rows"] = {}
+                if not servers:
+                    self.label(lst, "No servers where you can add emojis.\nYou need “Manage Expressions” or "
+                                    "“Create Expressions” in a server.", 13, "muted", justify="center").pack(pady=30)
+                    return
+                for i, g in enumerate(servers):
+                    inside = g["bot_in"]
+                    fr = ctk.CTkFrame(lst, fg_color=C["card_hi"] if inside else C["bg"], corner_radius=12,
+                                      border_width=1, border_color=C["border"] if inside else C["bg"], height=64)
+                    fr.pack(fill="x", padx=8, pady=4)
+                    fr.grid_columnconfigure(1, weight=1)
+                    ic = ctk.CTkLabel(fr, text="", image=self._guild_icon(g, dim=not inside), width=44)
+                    ic.grid(row=0, column=0, rowspan=2, padx=(12, 12), pady=10)
+                    nm = self.label(fr, g["name"], 14, "text" if inside else "faint", bold=inside, anchor="w")
+                    nm.grid(row=0, column=1, sticky="sw", pady=(10, 0))
+                    sub = self.label(fr, "Checking free slots…" if inside else "The bot isn't in this server yet",
+                                     11, "muted" if inside else "faint", anchor="w")
+                    sub.grid(row=1, column=1, sticky="nw", pady=(0, 10))
+                    row = dict(frame=fr, icon=ic, bot_in=inside, sub=sub)
+                    if inside:
+                        dot = ctk.CTkFrame(fr, width=18, height=18, corner_radius=9, fg_color=C["card"],
+                                           border_width=2, border_color=C["faint"])
+                        dot.grid(row=0, column=2, rowspan=2, padx=16)
+                        row["dot"] = dot
+                        for w in (fr, ic, nm, sub, dot):
+                            w.bind("<Button-1>", lambda _e, gid=g["id"]: select(gid))
+                            try:
+                                w.configure(cursor="hand2")
+                            except Exception:
+                                pass
+                        fill_slots(g, sub)
+                    else:
+                        self.button(fr, "Invite bot", lambda gid=g["id"]: (__import__("webbrowser").open(dl.invite_url(gid)),
+                                                                           warn.configure(text="After adding the bot in your browser, press Refresh.",
+                                                                                          text_color=C["muted"])),
+                                    "ghost", width=110, height=32, image=self.ico("external", C["text"], 13),
+                                    compound="left").grid(row=0, column=2, rowspan=2, padx=12)
+                    st["rows"][g["id"]] = row
+                    fetch_icon(g)
+                firsts = [g for g in servers if g["bot_in"]]
+                if firsts and st["sel"] is None and len(firsts) == 1:
+                    select(firsts[0]["id"])
+
+            def load(fresh=False):
+                if fresh:
+                    dl._guild_cache.clear()
+                for w in lst.winfo_children():
+                    w.destroy()
+                self.label(lst, "Loading your servers…", 13, "muted").pack(pady=30)
+
+                def job():
+                    try:
+                        servers, err = dl.servers(), None
+                    except Exception as e:  # noqa
+                        servers, err = [], e
+
+                    def done():
+                        if not top.winfo_exists():
+                            return
+                        if err:
+                            for w in lst.winfo_children():
+                                w.destroy()
+                            self.label(lst, str(err), 13, "bad", wraplength=560, justify="center").pack(pady=30)
+                            return
+                        st["servers"] = servers
+                        build(servers)
+                    self.ui(done)
+                threading.Thread(target=job, daemon=True).start()
+
+            def do_send():
+                gid = st["sel"]
+                if not gid or st["sending"]:
+                    return
+                g = next(x for x in st["servers"] if x["id"] == gid)
+                st["sending"] = True
+                send.configure(state="disabled", text="Sending…")
+                res_box._first = True
+
+                def job():
+                    good = 0
+                    for name, data, ext in items:
+                        lbl = {}
+                        self.ui(lambda name=name, lbl=lbl: lbl.setdefault(
+                            "w", result_line(f"Adding {(':' + name + ':') if kind == 'emoji' else name}…")))
+
+                        def waiting(sec, lbl=lbl):
+                            self.ui(lambda: lbl.get("w") and lbl["w"].configure(
+                                text=f"Discord asked to slow down, waiting {int(sec) + 1} s…"))
+                        try:
+                            if kind == "sticker":
+                                dl.add_sticker(gid, name, data, ext, on_wait=waiting)
+                                msg = f"Added the sticker “{name}” to {g['name']}"
+                            else:
+                                dl.add_emoji(gid, name, data, ext, on_wait=waiting)
+                                msg = f"Added :{name}: to {g['name']}"
+                            ok = True
+                            good += 1
+                        except Exception as e:  # noqa
+                            msg = f"{(':' + name + ':') if kind == 'emoji' else name}  →  {e}"
+                            ok = False
+                        self.ui(lambda msg=msg, ok=ok, lbl=lbl: (lbl.get("w") and lbl["w"].destroy(), result_line(msg, ok)))
+                    return good
+
+                def finish(good):
+                    st["sending"] = False
+                    if not top.winfo_exists():
+                        return
+                    bad = n - good
+                    if bad == 0:
+                        result_line(f"Done! {'The sticker is' if kind == 'sticker' else ('The emote is' if n == 1 else f'All {n} emotes are')} "
+                                    f"in {g['name']} now.", True)
+                        self.toast("Sent to Discord", f"{payload['title']} → {g['name']}", "ok")
+                        send.configure(text="Sent", state="disabled", image=self.ico("check", "#ffffff", 16))
+                    else:
+                        result_line(f"{good} of {n} added. {bad} failed. See the red lines above.", False)
+                        send.configure(text="Try again", state="normal", image=self.ico("refresh", "#ffffff", 15))
+                    r = st["rows"].get(gid)
+                    if r:
+                        dl._guild_cache.pop(gid, None)
+                        fill_slots(g, r["sub"])
+
+                def run():
+                    good = job()
+                    self.ui(lambda: finish(good))
+                threading.Thread(target=run, daemon=True).start()
+
+            load()
 
         # ================= toasts =================
         def toast(self, title, msg="", kind="ok", ms=4500):
@@ -3735,6 +4727,16 @@ def run_gui(start_hidden=False):
                 save_config(self.cfg)
             if self.cfg.get("check_updates", True):
                 self.root.after(1200, lambda: self.check_updates(manual=False))
+            if self.discord.connected():
+                def keep_bot():
+                    try:
+                        self.discord.check_bot()
+                        changed = self.discord.brand()
+                        if changed:
+                            self.log_lines.append(f"Bot {', '.join(changed)} set back to {BOT_NAME}.")
+                    except Exception as e:  # noqa
+                        self.log_lines.append(f"Couldn't check the Discord bot: {e}")
+                threading.Thread(target=keep_bot, daemon=True).start()
 
         def _set_update_btn(self, text, kind="ghost", icon=None):
             styles = {"ghost": (C["card_hi"], C["border"], C["text"]),

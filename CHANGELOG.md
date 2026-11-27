@@ -2,6 +2,19 @@
 
 Every release gets an entry here. The release build fails without one, and the text becomes the GitHub release notes and the app's "What's new" window.
 
+## v1.7.0 — 2026-11-27
+- New **Send to Discord**: add finished emotes and stickers straight to your servers with your own private bot
+  - Set it up once in Settings → Discord: make an app in the Discord Developer Portal, paste its 3 values and log in with Discord in your browser. The invite link for your server opens by itself
+  - Nothing to host: the app talks to Discord directly, so the bot only works while the app is open
+  - The panel lists every server you can add emotes to. Servers with the bot are in colour and show free slots; servers without it are dark, with an **Invite bot** button
+  - Pick a server and press Send. Each emote shows a green line when it's added, or a red line saying why it wasn't (no free slots, missing permission, bad file…)
+  - **Send to Discord** buttons on the Emotes tab and in the Converter, and the panel opens by itself after saving (you can turn this off)
+- The bot is always named "ISdook - emotes downloader" and uses the ISdook GitHub picture. The app puts both back on every start if they were changed
+- Privacy check: Settings warns in red if the bot is set to Public or the app belongs to another account, with a Fix button
+- Your Discord tokens are stored encrypted on your PC (Windows DPAPI)
+- Animated stickers longer than 5 seconds are cut to 5 seconds, Discord's limit
+- Converter: Convert and Send sit side by side, so everything fits on smaller screens
+
 ## v1.6.0 — 2026-11-27
 - New "Make it a: Emoji / Sticker" choice on the Emotes tab
   - **Emoji**: 128×128 pieces up to 256 KB, cut into pieces like before

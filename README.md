@@ -22,6 +22,7 @@ It also has a built-in **Converter** for your own images, GIFs and videos, so yo
 | **Emoji or sticker** | Choose **Emoji** (128×128, up to 256 KB, cut into pieces) or **Sticker** (exactly 320×320, up to 512 KB). Animated files become GIF and still ones PNG, keeping every frame whenever possible. |
 | **Converter** | Make an emoji, a sticker or any custom size from images, GIFs or videos, with your own size, fit, colours, frame rate and pixel-art scaling. |
 | **Drag and drop** | Drop files, whole folders or 7TV links anywhere on the window. |
+| **Send to Discord** | Your own private bot adds finished emotes and stickers to your servers in one click, with a green or red result for each one. |
 | **Files panel** | Collect lots of files or emotes, then save them all at once. |
 | **Tray icon** | Keeps running in the system tray, with a quick panel for saving copied links, browsing and updates. |
 | **Auto-updates** | Updates itself from GitHub releases and shows what's new after each update. |
@@ -74,8 +75,9 @@ It runs on Windows 10 and 11 (64-bit).
    - With several files in the list, **Save all** saves them all.
    - If you tick some, it becomes **Save selected** and saves only those.
 7. **Add them to Discord.**
-   - Emoji: upload the pieces in Server Settings → Emoji, then type them next to each other: `:OdaMeeting1::OdaMeeting2::OdaMeeting3::OdaMeeting4:`.
-   - Stickers: upload them in Server Settings → Stickers.
+   - The easy way: press **Send to Discord** and pick a server (see [Send to Discord](#send-to-discord)).
+   - By hand, emoji: upload the pieces in Server Settings → Emoji, then type them next to each other: `:OdaMeeting1::OdaMeeting2::OdaMeeting3::OdaMeeting4:`.
+   - By hand, stickers: upload them in Server Settings → Stickers.
 
 ---
 
@@ -100,6 +102,43 @@ The **Converter** tab is for when you want full control and don't want to upload
 5. **Press Convert.** Files are saved to a `Converted` folder inside your save folder.
 
 **About videos:** the first time you open a video, the app offers a one-time download of **ffmpeg**, a free and widely used video tool. It's about 40 MB, from PyPI, the official Python package site. Images and GIFs never need it.
+
+---
+
+## Send to Discord
+
+![Send to Discord](docs/discord.png)
+
+After saving an emote or sticker, the **Send to Discord** panel shows every server where you're allowed to add emojis:
+
+- **In colour:** your bot is in that server. You'll see the free emoji, animated and sticker slots.
+- **Dark:** the bot isn't there yet. Press **Invite bot** to add it.
+
+Pick a server and press **Send**. Each emote gets a line:
+- **green** when it's added
+- **red** with the reason when it isn't, for example no free slots, a missing permission or a file that's too big
+
+Then you can **Try again** or pick another server. You can also open the panel any time with **Send to Discord** on the Emotes tab or in the Converter.
+
+### Set up your private bot (once, about 2 minutes)
+
+The bot belongs to **your** Discord account, so nobody else can use it. You don't need to host anything: the app sends the emotes itself, so the bot only works while the app is open.
+
+1. Open **Settings → Discord** and press **Open portal**. On the [Discord Developer Portal](https://discord.com/developers/applications), press **New Application** and give it any name.
+2. On the **Bot** page:
+   - turn **Public Bot** **off**, so only you can add it to servers
+   - press **Reset Token** and copy the token
+3. On the **OAuth2** page:
+   - under **Redirects**, add `http://127.0.0.1:53682/callback` (the app has a **Copy** button)
+   - copy the **Client ID** and the **Client Secret**
+4. Paste the Application ID, Client Secret and Bot Token into the app and press **Connect my Discord account**.
+5. Discord's login page opens in your browser. Approve it, and then the invite page opens by itself. Choose your server.
+
+**Name and picture:** the app names the bot **ISdook - emotes downloader** and gives it the ISdook GitHub picture. It checks both on every start and puts them back if they were changed.
+
+**Privacy check:** Settings shows **Private ✓** when only you can add the bot. If **Public Bot** is on, or the app belongs to a different account, it shows a red warning and a **Fix** button.
+
+**Permissions:** the bot only asks for permission to add emojis and stickers. To add emotes, you need **Manage Expressions** (or **Create Expressions**) in that server, and so does the bot.
 
 ---
 
@@ -129,6 +168,7 @@ Changes save instantly.
 |---|---|
 | **General** | Keep running in the tray · Start with Windows · Notice copied 7TV links |
 | **Saving** | Save location · Piece size (128 / 96 / 64 px) · Also keep the original file |
+| **Discord** | Set up and connect your private bot · Privacy check · Invite the bot · Open "Send to Discord" after saving · Disconnect |
 | **Updates** | Check for updates on start · Install updates automatically · Check now · What's new |
 | **About** | Version, GitHub link, settings file location, reset all settings |
 
@@ -148,7 +188,7 @@ Changes save instantly.
 ## How the files are made
 
 - **Formats:** animated emotes become GIF and still ones PNG. These are the formats Discord accepts for emoji and stickers.
-- **Stickers:** always exactly 320×320. To get under 512 KB, only colours and frames are reduced, never the size.
+- **Stickers:** always exactly 320×320. To get under 512 KB, only colours and frames are reduced, never the size. Animated stickers are cut to 5 seconds, Discord's limit.
 - **Staying under 256 KB:** the app keeps every frame and shrinks the piece first, to 96, 72, 64 or 48 px. Discord shows emotes at 48 px at most, so they still look sharp. Frames are dropped only as a last resort.
 - **Video-like emotes:** the app stores only what changes between frames, which leaves room for more detail.
 - **Cut emotes:** every piece gets the same settings, so the pieces animate in sync. Each cut emote gets its own folder.
@@ -160,8 +200,9 @@ Everything runs on your PC. The app only connects to:
 - **7TV**, to find and download emotes
 - **GitHub**, to check for updates
 - **PyPI**, only if you choose to download video support
+- **Discord**, only if you set up Send to Discord, and only when you press Send. Emotes go straight from your PC to your server, with no server in between
 
-Your own files are never uploaded anywhere.
+Your Discord tokens are stored encrypted on your PC (Windows DPAPI). Your other files are never uploaded anywhere.
 
 ## Tips
 
@@ -174,6 +215,8 @@ Your own files are never uploaded anywhere.
 - **"Windows protected your PC":** click **More info → Run anyway**. It shows because the app isn't code-signed.
 - **A file is still over 256 KB** (shown in orange): lower the frame rate or colours in the Converter, or use fewer pieces.
 - **A video won't open:** accept the one-time video support download when the app asks.
+- **Send to Discord shows a red line:** the line says why. The usual reasons are no free slots, or that you or the bot are missing the **Manage Expressions** permission in that server.
+- **Discord login doesn't finish:** check that the redirect `http://127.0.0.1:53682/callback` is added on the OAuth2 page, exactly like that.
 - **Something went wrong:** click **Log** at the bottom right of the app to see what happened. You can also [open an issue](https://github.com/ISdook/emotes-downloader/issues).
 
 ---
