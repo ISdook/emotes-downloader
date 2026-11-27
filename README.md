@@ -124,7 +124,7 @@ Then you can **Try again** or pick another server. You can also open the panel a
 
 Discord doesn't let apps add emojis for a normal account login, so the app uses a bot that you create. The bot is yours alone: no other user can invite it, use it or see it in their app. You don't need to host anything: the app sends the emotes itself, so the bot only works while the app is open.
 
-Open **Settings → Discord** (or press **Discord settings** under **Send to Discord**). The setup guide walks you through it, and each step turns green when it's done:
+Open **Settings → Discord**, or press the **Discord settings** button under **Send to Discord**. The setup guide walks you through it, and each step turns green when it's done:
 
 ![The Discord setup guide](docs/discord-setup.png)
 

@@ -39,7 +39,7 @@ except ImportError:  # pragma: no cover
     print("Pillow is missing. Install it with:  python -m pip install pillow")
     sys.exit(1)
 
-__version__ = "1.8.4"
+__version__ = "1.8.5"
 UA = f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) emotes-downloader/{__version__}"
 GITHUB_REPO = "ISdook/emotes-downloader"
 PORTABLE_ASSET = "Emotes-Downloader-Portable.exe"
@@ -1479,6 +1479,18 @@ def update_log(msg):
         pass
 
 
+def short_path(p, n=42):
+    """Keep a long path on one line: 'C:/Users/…/Emotes/Converted'."""
+    p = str(p)
+    if len(p) <= n:
+        return p
+    parts = p.replace("\\", "/").split("/")
+    tail = "/".join(parts[-2:])
+    head = "/".join(parts[:2])
+    out = f"{head}/…/{tail}"
+    return out if len(out) <= n + 6 else "…" + p[-n:]
+
+
 def portable_names(exe):
     """For a portable .exe (also when it runs as 'X.new.exe' or 'X.old.exe'): (X.exe, X.new.exe, X.old.exe)."""
     exe = Path(exe)
@@ -2217,7 +2229,7 @@ def run_gui(start_hidden=False):
             self.send_btn = self.button(sf, "Send to Discord", self.on_send_discord, "discord", height=40,
                                         image=self.ico("send", "#ffffff", 16), compound="left")
             self.send_btn.grid(row=0, column=0, sticky="ew")
-            self.discord_link(sf).grid(row=1, column=0, pady=(2, 0))
+            self.discord_link(sf).grid(row=1, column=0, sticky="ew", pady=(6, 0))
             self.save_all_btn = self.button(ctl, "Save all", lambda: self.on_save(True), "ghost", height=38)
 
             st = ctk.CTkFrame(ctl, fg_color="transparent")
@@ -2230,13 +2242,13 @@ def run_gui(start_hidden=False):
                 button_hover_color=C["border"], text_color=C["text"], dropdown_fg_color=C["card_hi"],
                 dropdown_hover_color=C["border"], dropdown_text_color=C["text"])
             self.save_menu.grid(row=0, column=1, sticky="ew")
+            self.button(st, "", lambda: self.on_open_out(), "ghost", width=34, height=30, corner_radius=8,
+                        image=self.ico("folder", C["text"], 15)).grid(row=0, column=2, padx=(6, 0))
             self.path_lbl = ctk.CTkLabel(ctl, text="", font=self.F(11), text_color=C["faint"], anchor="w",
                                          justify="left", wraplength=280, cursor="hand2")
-            self.path_lbl.grid(row=13, column=0, pady=(4, 0), **pad)
+            self.path_lbl.grid(row=13, column=0, pady=(4, 14), **pad)
             self.path_lbl.bind("<Button-1>", lambda _e: self.on_open_out(True))
 
-            self.button(ctl, "Open folder", lambda: self.on_open_out(), "ghost", height=38,
-                        image=self.ico("folder", C["text"], 15), compound="left").grid(row=14, column=0, pady=(10, 14), **pad)
             ctl.grid_rowconfigure(15, weight=1)
 
             # ---- status bar
@@ -3511,7 +3523,7 @@ def run_gui(start_hidden=False):
             self.cv_preset_help.grid(row=4, column=0, pady=(6, 0), **pad)
 
             def seg_row(row, title, values, key, default):
-                self.section(opt, title).grid(row=row, column=0, pady=(10, 5), **pad)
+                self.section(opt, title).grid(row=row, column=0, pady=(8, 4), **pad)
                 sg = self.segmented(opt, values, lambda _v: self._conv_changed())
                 sg.set(cfg.get(key, default))
                 sg.grid(row=row + 1, column=0, **pad)
@@ -3522,7 +3534,7 @@ def run_gui(start_hidden=False):
             self.cv_fit = seg_row(7, "Fit", list(FITS), "fit", "Fill")
             self.cv_scale = seg_row(9, "Scaling", ["Smooth", "Pixel art"], "scale", "Smooth")
             self.cv_fps = seg_row(11, "Frame rate", ["Keep", "30", "20", "15", "10"], "fps", "Keep")
-            self.section(opt, "Colours").grid(row=13, column=0, pady=(10, 5), **pad)
+            self.section(opt, "Colours").grid(row=13, column=0, pady=(8, 4), **pad)
             cr = ctk.CTkFrame(opt, fg_color="transparent")
             cr.grid(row=14, column=0, **pad)
             cr.grid_columnconfigure(0, weight=1)
@@ -3538,15 +3550,15 @@ def run_gui(start_hidden=False):
             cb = ctk.CTkFrame(opt, fg_color="transparent")
             cb.grid(row=15, column=0, pady=(10, 0), **pad)
             cb.grid_columnconfigure(0, weight=1)
-            self.conv_btn = self.button(cb, "Convert", self.conv_run, "accent", height=46, corner_radius=12,
+            self.conv_btn = self.button(cb, "Convert", self.conv_run, "accent", height=42, corner_radius=12,
                                         font=self.F(15, True), image=self.ico("download", "#ffffff", 18), compound="left")
             self.conv_btn.grid(row=0, column=0, sticky="ew")
             self.conv_dest = ctk.CTkLabel(opt, text="", font=self.F(11), text_color=C["faint"], anchor="w",
                                           justify="left", wraplength=290, cursor="hand2")
-            self.conv_send = self.button(cb, "Send", self.conv_send_discord, "discord", width=96, height=46,
+            self.conv_send = self.button(cb, "Send", self.conv_send_discord, "discord", width=96, height=42,
                                          corner_radius=12, image=self.ico("send", "#ffffff", 15), compound="left")
             self.conv_send.grid(row=0, column=1, padx=(8, 0))
-            self.discord_link(cb).grid(row=1, column=0, columnspan=2, sticky="e", pady=(2, 0))
+            self.discord_link(cb).grid(row=1, column=0, columnspan=2, sticky="ew", pady=(6, 0))
             self.conv_dest.grid(row=17, column=0, pady=(0, 12), **pad)
             self.conv_dest.bind("<Button-1>", lambda _e: self._conv_open_out())
             opt.grid_rowconfigure(18, weight=1)
@@ -3691,7 +3703,8 @@ def run_gui(start_hidden=False):
                 self.conv_empty.place(relx=0.5, rely=0.45, anchor="center")
             self.conv_btn.configure(text=f" Convert {n}" if n > 1 else " Convert",
                                     state="normal" if n else "disabled")
-            self.conv_dest.configure(text=f"  {self.conv_out_dir()}", image=self.ico("folder", C["faint"], 13), compound="left")
+            self.conv_dest.configure(text=f"  {short_path(self.conv_out_dir(), 42)}", image=self.ico("folder", C["faint"], 13),
+                                     compound="left")
 
         def _conv_select(self):
             sel = self.conv_list.curselection()
@@ -3873,9 +3886,10 @@ def run_gui(start_hidden=False):
 
         def discord_link(self, parent):
             """Small 'Discord settings' link shown under the Send buttons."""
-            return ctk.CTkButton(parent, text=" Discord settings", command=lambda: self.open_settings("Discord"),
-                                 height=22, corner_radius=6, fg_color="transparent", hover_color=C["card_hi"],
-                                 text_color=C["muted"], font=self.F(11), image=self.ico("gear", C["muted"], 12),
+            return ctk.CTkButton(parent, text="  Discord settings", command=lambda: self.open_settings("Discord"),
+                                 height=32, corner_radius=10, fg_color="transparent", hover_color=C["card_hi"],
+                                 border_width=1, border_color=C["blurple"], text_color=C["text"],
+                                 font=self.F(13, True), image=self.ico("gear", C["blurple"], 16),
                                  compound="left", width=10)
 
         def _need_discord(self):

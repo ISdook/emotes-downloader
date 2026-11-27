@@ -2,6 +2,11 @@
 
 Every release gets an entry here. The release build fails without one, and the text becomes the GitHub release notes and the app's "What's new" window.
 
+## v1.8.5 — 2026-11-27
+- The **Discord settings** button under **Send to Discord** is bigger and easier to see (Emotes tab and Converter)
+- Emotes tab: **Open folder** is now the folder button next to **Save to**, so everything fits
+- Converter: the output folder fits on one line
+
 ## v1.8.4 — 2026-11-27
 - Portable version: updating no longer leaves two copies of the app. You keep one .exe with its normal name, and it's the new version
   - If Windows keeps the old .exe locked for a while (for example while an antivirus scans it), the new version moves the old one aside and takes its name instead of giving up
