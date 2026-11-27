@@ -2,7 +2,7 @@
 
 Last updated: November 2026.
 
-These terms cover the Emotes Downloader bot ("ISdook - emotes downloader"), the dashboard website at https://emotes-downloader.isdook.workers.dev, and the Emotes Downloader app.
+These terms cover the Emotes Downloader bot, the dashboard website at https://emotes-downloader.isdook.workers.dev, and the Emotes Downloader app.
 
 ## Using Emotes Downloader
 

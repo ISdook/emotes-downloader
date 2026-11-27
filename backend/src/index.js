@@ -12,6 +12,10 @@
 import PAGE from "./web/index.html";
 import CSS from "./web/style.css";
 import CLIENT_JS from "./web/app.client.js";
+import ICON from "./web/icon.png";
+import { Buffer } from "node:buffer";
+import { pieceGrid, pieceNames, cutWithImages, shrinkWithImages } from "./pieces.js";
+import { botBio } from "./profile.js";
 
 const ADMIN = 1n << 3n;
 const MANAGE_GUILD = 1n << 5n;
@@ -59,10 +63,7 @@ function b64url(bytes) {
 }
 
 function b64(bytes) {
-  let s = "";
-  const chunk = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunk) s += String.fromCharCode(...bytes.subarray(i, i + chunk));
-  return btoa(s);
+  return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("base64");   // native, fast
 }
 
 function unb64(text) {
@@ -227,6 +228,26 @@ async function botGuildIds(env) {
     }
     return ids;
   });
+}
+
+// How many servers the bot is in (just the number; Discord keeps it up to date).
+async function serverCount(env) {
+  return cached("server-count", 60, async () => {
+    const r = await discord(env, "GET", "/applications/@me", { bot: true });
+    if (r.status !== 200) throw discordError(r);
+    return { servers: Number(r.data.approximate_guild_count || 0), description: r.data.description || "" };
+  });
+}
+
+// Keeps the bot's bio up to date with the server count (cron, every 30 minutes).
+async function updateBio(env) {
+  await forgetCache("server-count");
+  const { servers, description } = await serverCount(env);
+  const bio = botBio(env.PUBLIC_URL, servers);
+  if (bio === description) return;
+  const r = await discord(env, "PATCH", "/applications/@me", { bot: true, json: { description: bio } });
+  if (r.status !== 200) console.log("bio not updated:", r.status, JSON.stringify(r.data).slice(0, 200));
+  await forgetCache("server-count");
 }
 
 function computePerms(guild, member, userId) {
@@ -611,8 +632,8 @@ function sevenTvId(link) {
   return null;
 }
 
-// Picks the biggest 7TV file that still fits Discord's 256 KB (GIF for animated, PNG for still).
-async function sevenTvEmoji(env, link) {
+// Reads a 7TV emote: its name, whether it moves, and the files 7TV has for it.
+async function sevenTvLookup(env, link) {
   const id = sevenTvId(link);
   if (!id) fail(400, "Paste a 7TV emote link, like https://7tv.app/emotes/01FD667N200009ZAD9VPCVD4JX");
   const r = await fetch(`${env.SEVENTV_API || "https://7tv.io/v3"}/emotes/${id}`, { headers: { "User-Agent": "EmotesDownloader" } })
@@ -625,28 +646,102 @@ async function sevenTvEmoji(env, link) {
   const files = (host.files || []).filter((f) => String(f.format || "").toUpperCase() === fmt
     || String(f.name || "").toLowerCase().endsWith(`.${fmt.toLowerCase()}`));
   files.sort((a, b) => (b.width * b.height) - (a.width * a.height));
-  const pick = files.find((f) => !f.size || f.size <= MAX_EMOJI);
-  if (!pick) fail(413, "This emote is too big for Discord. Use the Emotes Downloader app to shrink it.");
+  if (!files.length) fail(415, "7TV has no GIF or PNG file for this emote.");
   const base = (host.url || `//cdn.7tv.app/emote/${id}`).replace(/^\/\//, "https://");
-  const f = await fetch(`${base}/${pick.name}`).catch(() => fail(502, "Couldn't download the emote from 7TV."));
+  return { id, name: cleanEmojiName(e.name, "emote"), animated: !!e.animated, files, base };
+}
+
+async function sevenTvFile(info, file) {
+  const f = await fetch(`${info.base}/${file.name}`).catch(() => fail(502, "Couldn't download the emote from 7TV."));
   if (!f.ok) fail(502, "Couldn't download the emote from 7TV.");
-  const bytes = new Uint8Array(await f.arrayBuffer());
-  if (bytes.length > MAX_EMOJI) fail(413, "This emote is too big for Discord. Use the Emotes Downloader app to shrink it.");
-  const wide = (pick.width || 1) / (pick.height || 1) >= 1.5;
-  return {
-    name: cleanEmojiName(e.name, "emote"), animated: !!e.animated, wide,
-    image: dataUri(bytes, e.animated ? "image/gif" : "image/png"),
-  };
+  return new Uint8Array(await f.arrayBuffer());
+}
+
+// Turns a 7TV emote into what gets uploaded: one emoji, or several pieces for a wide emote.
+//   cut = false  -> never cut
+// Returns { items: [{ name, image }], pieces, note }
+async function sevenTvEmoji(env, link, { name, cut = true } = {}) {
+  const info = await sevenTvLookup(env, link);
+  const baseName = name ? cleanEmojiName(name) : info.name;
+  const mime = info.animated ? "image/gif" : "image/png";
+  const biggest = info.files[0];
+  const grid = pieceGrid(biggest.width, biggest.height);
+  let note = "";
+
+  if (cut && grid.count > 1) {
+    if (env.IMAGES) {
+      try {
+        const src = await sevenTvFile(info, biggest);
+        const pieces = await cutWithImages(env.IMAGES, src, { ...grid, animated: info.animated, limit: MAX_EMOJI });
+        const names = pieceNames(baseName, pieces.length);
+        return { items: pieces.map((p, i) => ({ name: names[i], image: dataUri(p.bytes, mime) })), pieces: pieces.length, animated: info.animated, note };
+      } catch (e) {
+        console.log("cut failed:", e && e.message);
+      }
+    }
+    note = "It's a wide emote, but it couldn't be cut into pieces right now, so it was added in one piece.";
+  } else if (grid.count > 1) {
+    note = "It's a wide emote, so Discord shows it small.";
+  }
+
+  // One piece: the biggest 7TV file that fits in 256 KB, or a smaller copy made with Images.
+  const fits = info.files.find((f) => f.size && f.size <= MAX_EMOJI) || info.files.find((f) => !f.size);
+  let bytes = fits ? await sevenTvFile(info, fits) : null;
+  if ((!bytes || bytes.length > MAX_EMOJI) && env.IMAGES) {
+    try {
+      bytes = await shrinkWithImages(env.IMAGES, bytes || await sevenTvFile(info, biggest), { animated: info.animated, limit: MAX_EMOJI });
+    } catch {
+      bytes = null;
+    }
+  }
+  if (!bytes || bytes.length > MAX_EMOJI) fail(413, "This emote is too big for Discord. Use the Emotes Downloader app to shrink it.");
+  return { items: [{ name: baseName, image: dataUri(bytes, mime) }], pieces: 1, animated: info.animated, note };
+}
+
+// Free emoji slots of one kind (animated or not) in a server, read live with the bot.
+async function freeSlots(env, guildId, animated) {
+  const r = await discord(env, "GET", `/guilds/${guildId}`, { bot: true });
+  if (r.status !== 200) throw discordError(r);
+  const tier = Math.max(0, Math.min(3, Number(r.data.premium_tier || 0)));
+  const used = (r.data.emojis || []).filter((e) => !!e.animated === animated).length;
+  return Math.max(0, EMOJI_LIMITS[tier] - used);
+}
+
+// Adds every item (one emoji or all pieces). One failed piece stops the rest so a half emote isn't left
+// with gaps; what was added is still returned.
+async function addSevenTv(env, { guildId, user, link, name, cut, source }) {
+  await checkUploadLimit(env, user.id);
+  const em = await sevenTvEmoji(env, link, { name, cut });
+  const free = await freeSlots(env, guildId, em.animated);
+  const kind = em.animated ? "animated" : "static";
+  if (free < em.items.length) {
+    fail(409, em.items.length > 1
+      ? `This emote is cut into ${em.items.length} pieces, but the server only has ${free} free ${kind} emoji slot${free === 1 ? "" : "s"}. `
+        + "Free some slots, or add it without cutting."
+      : `No free ${kind} emoji slots left in this server.`, { code: "no_slots" });
+  }
+  const added = [];
+  let error = null;
+  for (const it of em.items) {
+    try {
+      added.push(await createEmoji(env, { guildId, user, name: it.name, image: it.image, source }));
+    } catch (e) {
+      error = e;
+      break;
+    }
+  }
+  if (!added.length && error) throw error;
+  return { added, pieces: em.pieces, note: em.note, error: error ? (error instanceof HttpError ? error.message : "Something went wrong.") : null };
 }
 
 async function apiAdd7tv(req, env, s, guildId) {
   await authorize(env, guildId, s.user_id, CAN_UPLOAD);
-  await checkUploadLimit(env, s.user_id);
   const body = await req.json().catch(() => fail(400, "Bad request."));
-  const em = await sevenTvEmoji(env, body.link);
-  const name = body.name ? cleanEmojiName(body.name) : em.name;
-  const emoji = await createEmoji(env, { guildId, user: { id: s.user_id, name: s.user_name }, name, image: em.image, source: "7tv" });
-  return json({ ok: true, emoji, wide: em.wide });
+  const res = await addSevenTv(env, {
+    guildId, user: { id: s.user_id, name: s.user_name }, link: body.link, name: body.name,
+    cut: body.cut !== false, source: "7tv",
+  });
+  return json({ ok: true, emoji: res.added[0], emojis: res.added, pieces: res.pieces, note: res.note, error: res.error });
 }
 
 // ---------------------------------------------------------------- /emote command (Discord interactions)
@@ -691,12 +786,20 @@ async function interactions(req, env, ctx) {
   };
   ctx.waitUntil((async () => {
     try {
-      await checkUploadLimit(env, user.id);
-      const em = await sevenTvEmoji(env, opts.link);
-      const name = opts.name ? cleanEmojiName(opts.name) : em.name;
-      const e = await createEmoji(env, { guildId: it.guild_id, user, name, image: em.image, source: "command" });
-      const tag = `<${e.animated ? "a" : ""}:${e.name}:${e.id}>`;
-      await followUp(`${tag} Added **:${e.name}:**` + (em.wide ? "\nIt's a wide emote, so Discord shows it small. The Emotes Downloader app can cut it into pieces." : ""));
+      const res = await addSevenTv(env, {
+        guildId: it.guild_id, user, link: opts.link, name: opts.name, cut: opts.cut !== false, source: "command",
+      });
+      const tags = res.added.map((e) => `<${e.animated ? "a" : ""}:${e.name}:${e.id}>`).join("");
+      let msg;
+      if (res.pieces > 1) {
+        msg = `${tags}\nAdded in ${res.pieces} pieces: ` + res.added.map((e) => `\`:${e.name}:\``).join(" ")
+          + "\nType them together, with no spaces, to show the whole emote.";
+      } else {
+        msg = `${tags} Added **:${res.added[0].name}:**`;
+      }
+      if (res.note) msg += `\n${res.note}`;
+      if (res.error) msg += `\n❌ Only ${res.added.length} of ${res.pieces} pieces were added: ${res.error}`;
+      await followUp(msg.slice(0, 1990));
     } catch (err) {
       await followUp(`❌ ${err instanceof HttpError ? err.message : "Something went wrong. Please try again."}`);
     }
@@ -733,6 +836,13 @@ async function route(req, env, ctx) {
   const M = req.method;
 
   if (M === "GET" && p === "/app.css") return new Response(CSS, { headers: { "content-type": "text/css; charset=utf-8", "cache-control": "max-age=300", ...SECURITY } });
+  if (M === "GET" && (p === "/icon.png" || p === "/favicon.ico")) {
+    return new Response(ICON, { headers: { "content-type": "image/png", "cache-control": "max-age=86400", ...SECURITY } });
+  }
+  if (M === "GET" && p === "/api/stats") {
+    const { servers } = await serverCount(env);
+    return json({ servers }, 200, { "cache-control": "max-age=30" });
+  }
   if (M === "GET" && p === "/app.js") return new Response(CLIENT_JS, { headers: { "content-type": "text/javascript; charset=utf-8", "cache-control": "max-age=300", ...SECURITY } });
   if (M === "GET" && (p === "/" || p === "/dashboard" || p.startsWith("/dashboard/") || p === "/privacy" || p === "/terms")) {
     return page(env, req);
@@ -807,7 +917,11 @@ export default {
     }
   },
 
-  async scheduled(_event, env) {
+  async scheduled(event, env) {
+    if (event.cron !== "17 3 * * *") {           // every 30 minutes: the bio with the server count
+      await updateBio(env);
+      return;
+    }
     const t = now();
     await env.DB.batch([
       env.DB.prepare("DELETE FROM login_states WHERE created_at < ?").bind(t - 3600e3),
@@ -819,3 +933,4 @@ export default {
 };
 
 export { cleanEmojiName, sevenTvId, computePerms };
+

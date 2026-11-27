@@ -2,7 +2,7 @@
 
 Last updated: November 2026.
 
-This covers the Emotes Downloader bot ("ISdook - emotes downloader"), the dashboard website at https://emotes-downloader.isdook.workers.dev, and the "Log in with Discord" feature of the Emotes Downloader app.
+This covers the Emotes Downloader bot, the dashboard website at https://emotes-downloader.isdook.workers.dev, and the "Log in with Discord" feature of the Emotes Downloader app.
 
 ## What we store
 

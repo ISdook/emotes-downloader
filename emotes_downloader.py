@@ -39,7 +39,7 @@ except ImportError:  # pragma: no cover
     print("Pillow is missing. Install it with:  python -m pip install pillow")
     sys.exit(1)
 
-__version__ = "1.11.0"
+__version__ = "1.12.0"
 UA = f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) emotes-downloader/{__version__}"
 GITHUB_REPO = "ISdook/emotes-downloader"
 PORTABLE_ASSET = "Emotes-Downloader-Portable.exe"
@@ -777,36 +777,13 @@ def trim_frames(frames, max_ms):
 
 
 # --------------------------------------------------------------------------
-# Discord: your own private bot adds emotes / stickers to your servers
+# Discord: "Log in with Discord" and the public bot "Emotes Downloader".
+# The bot's token lives only on the backend (backend/ in this repo, a Cloudflare Worker).
 # --------------------------------------------------------------------------
 
-DISCORD_API = "https://discord.com/api/v10"
-DISCORD_PORT = 53682
-DISCORD_REDIRECT = f"http://127.0.0.1:{DISCORD_PORT}/callback"
-PERM_ADMIN = 1 << 3
+DISCORD_PORT = 53682            # the app catches the login on http://127.0.0.1:53682/callback
 PERM_MANAGE_EXPR = 1 << 30
 PERM_CREATE_EXPR = 1 << 43
-BOT_PERMISSIONS = PERM_MANAGE_EXPR | PERM_CREATE_EXPR
-BOT_NAME = "ISdook - emotes downloader"   # the app keeps the bot's name and picture like this
-BOT_AVATAR_URLS = ("https://avatars.githubusercontent.com/u/221166014?s=512", "https://github.com/ISdook.png?size=512")
-BOT_DESCRIPTION = "Private bot for Emotes Downloader by ISdook. Adds emotes and stickers to your own servers."
-EMOJI_LIMITS = {0: 50, 1: 100, 2: 150, 3: 250}     # per type (static / animated), by boost level
-STICKER_LIMITS = {0: 5, 1: 15, 2: 30, 3: 60}
-DISCORD_ERRORS = {
-    10004: "This server can't be found. The bot may have been removed from it.",
-    30008: "No free emoji slots left in this server.",
-    30039: "No free sticker slots left in this server.",
-    40001: "Discord says the bot isn't authorized. Check the bot token in Settings → Discord.",
-    50001: "The bot can't access this server.",
-    50013: "The bot is missing the “Create Expressions” permission in this server.",
-    50045: "The file is too big for Discord.",
-    50046: "Discord couldn't read this image.",
-    50138: "Discord couldn't resize this image.",
-    170005: "Discord rejected the sticker file (it must be 320×320, at most 512 KB and 5 seconds).",
-    170006: "Discord couldn't read the sticker file.",
-}
-
-
 class DiscordError(RuntimeError):
     def __init__(self, msg, status=0, code=0):
         super().__init__(msg)
@@ -880,83 +857,6 @@ def _multipart(fields, files):
     return out.getvalue(), f"multipart/form-data; boundary={boundary}"
 
 
-def _discord_msg(status, j):
-    code = j.get("code", 0) if isinstance(j, dict) else 0
-    if isinstance(j, dict) and j.get("error_description"):
-        return f"Discord login failed: {j['error_description']}"
-    if code in DISCORD_ERRORS:
-        msg = DISCORD_ERRORS[code]
-    elif status == 401:
-        msg = "Discord says the token is wrong or expired."
-    elif status == 403:
-        msg = "Discord refused this: the bot is missing a permission in that server."
-    else:
-        msg = (j.get("message") if isinstance(j, dict) else None) or f"Discord error {status}"
-    details = []
-
-    def walk(o):
-        if isinstance(o, dict):
-            for k, v in o.items():
-                if k == "_errors":
-                    details.extend(x.get("message", "") for x in v)
-                else:
-                    walk(v)
-    if isinstance(j, dict):
-        walk(j.get("errors") or {})
-    details = [d for d in details if d and d not in msg]
-    return msg + (f" ({'; '.join(details)})" if details else "")
-
-
-def discord_request(method, path, bot=None, bearer=None, json_body=None, form=None, files=None, basic=None,
-                    on_wait=None, timeout=30):
-    """Call the Discord API. Waits out short rate limits, and raises DiscordError with a readable message."""
-    url = path if path.startswith("http") else DISCORD_API + path
-    headers = {"User-Agent": f"DiscordBot (https://github.com/{GITHUB_REPO}, {__version__})",
-               "Accept": "application/json"}
-    if bot:
-        headers["Authorization"] = f"Bot {bot}"
-    elif bearer:
-        headers["Authorization"] = f"Bearer {bearer}"
-    elif basic:
-        headers["Authorization"] = "Basic " + base64.b64encode(f"{basic[0]}:{basic[1]}".encode()).decode()
-    data = None
-    if files is not None:
-        data, ctype = _multipart(form or {}, files)
-        headers["Content-Type"] = ctype
-    elif form is not None:
-        data = urllib.parse.urlencode(form).encode()
-        headers["Content-Type"] = "application/x-www-form-urlencoded"
-    elif json_body is not None:
-        data = json.dumps(json_body).encode()
-        headers["Content-Type"] = "application/json"
-    for attempt in range(4):
-        req = urllib.request.Request(url, data=data, method=method, headers=headers)
-        try:
-            with urllib.request.urlopen(req, timeout=timeout) as r:
-                body = r.read()
-                return json.loads(body) if body else None
-        except urllib.error.HTTPError as e:
-            raw = e.read()
-            try:
-                j = json.loads(raw) if raw else {}
-            except ValueError:
-                j = {"message": raw[:200].decode("utf-8", "replace")}
-            if e.code == 429:
-                wait = float(j.get("retry_after") or e.headers.get("Retry-After") or 5)
-                if wait > 90 or attempt == 3:
-                    err = DiscordError(f"Discord is rate-limiting this. Try again in {int(wait) + 1} s.", 429)
-                    err.retry_after = wait
-                    raise err from None
-                if on_wait:
-                    on_wait(wait)
-                time.sleep(wait + 0.3)
-                continue
-            raise DiscordError(_discord_msg(e.code, j), e.code, j.get("code", 0) if isinstance(j, dict) else 0) from None
-        except urllib.error.URLError as e:
-            raise DiscordError(f"Couldn't reach Discord ({e.reason}). Check your internet connection.") from None
-    raise DiscordError("Discord didn't answer.")
-
-
 def discord_wait_for_code(state, timeout=300):
     """Tiny local web server that catches Discord's login redirect."""
     from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -1005,315 +905,8 @@ def discord_wait_for_code(state, timeout=300):
     raise DiscordError(result.get("error") or "Timed out waiting for the Discord login.")
 
 
-class DiscordLink:
-    """Your own Discord app + bot, linked to your Discord account. Secrets are stored encrypted."""
-
-    def __init__(self, cfg, save):
-        self.cfg, self._save = cfg, save
-        self.d = cfg.setdefault("discord", {})
-        self._guild_cache = {}
-
-    # --- stored values
-    @property
-    def client_id(self):
-        return self.d.get("client_id", "")
-
-    @property
-    def secret(self):
-        return unprotect(self.d.get("secret", ""))
-
-    @property
-    def bot(self):
-        return unprotect(self.d.get("bot", ""))
-
-    @property
-    def user(self):
-        """The logged-in Discord account, or else the bot's owner (that's you: you made the bot)."""
-        return self.d.get("user") or self.d.get("owner") or {}
-
-    @property
-    def bot_user(self):
-        return self.d.get("bot_user") or {}
-
-    def configured(self):
-        return bool(self.bot)
-
-    def connected(self):
-        """Linked = we have your bot's token and its app (the owner is filled in by check_bot on every start)."""
-        return bool(self.bot and self.client_id)
-
-    def logged_in(self):
-        """Optional extra: logged in with Discord, so servers without the bot can be listed too."""
-        return bool(self.d.get("refresh") and self.secret)
-
-    def link(self, bot_token):
-        """One-step linking: everything else (app ID, owner, invite link) comes from the token."""
-        tok = (bot_token or "").strip().strip('"').strip()
-        if tok.lower().startswith("bot "):
-            tok = tok[4:].strip()
-        if len(tok) < 50 or tok.count(".") != 2:
-            raise DiscordError("That doesn't look like a bot token. On the Bot page press Reset Token, then Copy.")
-        old = self.bot
-        self.d["bot"] = protect(tok)
-        try:
-            self.check_bot()
-        except DiscordError as e:
-            if old:
-                self.d["bot"] = protect(old)
-            else:
-                self.d.pop("bot", None)
-            self._save()
-            if e.status == 401:
-                raise DiscordError("Discord didn't accept that token. Press Reset Token on the Bot page and copy the new one.") from None
-            raise
-        if self.client_id != self.d.get("linked_app"):      # a different bot than before: drop the old login
-            for k in ("refresh", "access", "expires", "user", "secret", "app_branded", "avatar_id", "avatar_src"):
-                self.d.pop(k, None)
-            self.d["linked_app"] = self.client_id
-        self._guild_cache.clear()
-        self._save()
-        self.make_private()
-        return self.user
-
-    def set_secret(self, secret):
-        if not (secret or "").strip():
-            raise DiscordError("Paste the Client Secret first.")
-        self.d["secret"] = protect(secret.strip())
-        self._save()
-
-    def forget(self, everything=False):
-        for k in ("refresh", "access", "expires", "user"):
-            self.d.pop(k, None)
-        if everything:
-            self.d.clear()
-        self._guild_cache.clear()
-        self._save()
-
-    # --- auth
-    def check_bot(self):
-        me = discord_request("GET", "/users/@me", bot=self.bot)
-        app = discord_request("GET", "/oauth2/applications/@me", bot=self.bot)
-        o = app.get("owner") or {}
-        team = app.get("team") or {}
-        owner = (str(team.get("owner_user_id")) if team.get("owner_user_id") else None) or o.get("id")
-        if team.get("owner_user_id"):
-            o = next((m.get("user") or {} for m in team.get("members") or []
-                      if str((m.get("user") or {}).get("id")) == str(team["owner_user_id"])), {})
-        self.d["bot_user"] = dict(id=me.get("id"), name=me.get("username"), avatar=me.get("avatar"))
-        self.d.update(client_id=str(app.get("id") or me.get("id") or ""), public=bool(app.get("bot_public")),
-                      owner_id=str(owner or ""),
-                      owner=dict(id=str(owner or ""), name=o.get("global_name") or o.get("username") or "you"))
-        self._save()
-        return me
-
-    def make_private(self):
-        """Try to turn off "Public Bot" for you. If Discord doesn't allow it, Settings shows a Fix button."""
-        if self.is_private():
-            return True
-        try:
-            app = discord_request("PATCH", "/applications/@me", bot=self.bot, json_body={"bot_public": False})
-            self.d["public"] = bool(app.get("bot_public"))
-            self._save()
-        except DiscordError:
-            pass
-        return self.is_private()
-
-    def is_private(self):
-        """Private = only the owner can invite the bot ("Public Bot" turned off in the portal)."""
-        return not self.d.get("public", False)
-
-    def guard(self, gid):
-        """Checked right before every send, so the bot only ever works for its owner, in the owner's own servers.
-        The bot has no commands and never goes online, so nobody else in a server can use it."""
-        self.check_bot()   # fresh: Public Bot setting and app owner
-        if not self.is_private():
-            raise DiscordError("Your bot is set to Public. Turn off “Public Bot” (Discord settings, step 3), "
-                               "so only you can use it.")
-        uid, owner = str(self.user.get("id") or ""), self.d.get("owner_id") or ""
-        if not uid or not owner or uid != owner:
-            raise DiscordError("You're logged in with a different Discord account than the one that owns this bot.")
-        mine = {g["id"]: g for g in self.servers()}   # fresh: only servers where YOU are a member and can add emojis
-        if gid not in mine:
-            raise DiscordError("This isn't one of your servers, or you can't add emojis there anymore.")
-        if not mine[gid]["bot_in"]:
-            raise DiscordError("The bot isn't in this server yet. Press Invite bot first.")
-
-    def _avatar_bytes(self):
-        """Your GitHub picture (cached on this PC)."""
-        cache = data_dir() / "bot_avatar.png"
-        for url in BOT_AVATAR_URLS:
-            try:
-                raw = http_get(url, timeout=20, site="GitHub")
-                im = Image.open(io.BytesIO(raw)).convert("RGBA")
-                im.thumbnail((512, 512))
-                buf = io.BytesIO()
-                im.save(buf, "PNG")
-                cache.parent.mkdir(parents=True, exist_ok=True)
-                cache.write_bytes(buf.getvalue())
-                return buf.getvalue()
-            except Exception:
-                continue
-        return cache.read_bytes() if cache.exists() else None
-
-    def brand(self, force=False):
-        """Keep the bot's name and picture as ISdook - emotes downloader. Returns what changed."""
-        import hashlib
-        me = discord_request("GET", "/users/@me", bot=self.bot)
-        changed, patch = [], {}
-        if me.get("username") != BOT_NAME:
-            patch["username"] = BOT_NAME
-        pic = self._avatar_bytes()
-        pic_hash = hashlib.sha1(pic).hexdigest() if pic else None
-        if pic and (force or me.get("avatar") is None or me.get("avatar") != self.d.get("avatar_id")
-                    or self.d.get("avatar_src") != pic_hash):
-            patch["avatar"] = "data:image/png;base64," + base64.b64encode(pic).decode()
-        if patch:
-            me = discord_request("PATCH", "/users/@me", bot=self.bot, json_body=patch)
-            changed += [k for k in ("username", "avatar") if k in patch]
-            if "avatar" in patch:
-                self.d.update(avatar_id=me.get("avatar"), avatar_src=pic_hash)
-        if pic and not self.d.get("app_branded"):
-            try:
-                discord_request("PATCH", "/applications/@me", bot=self.bot,
-                                json_body={"icon": "data:image/png;base64," + base64.b64encode(pic).decode(),
-                                           "description": BOT_DESCRIPTION})
-                self.d["app_branded"] = True
-                changed.append("app icon")
-            except DiscordError:
-                pass
-        self.d["bot_user"] = dict(id=me.get("id"), name=me.get("username"), avatar=me.get("avatar"))
-        self._save()
-        return changed
-
-    def login_url(self, state):
-        return "https://discord.com/oauth2/authorize?" + urllib.parse.urlencode({
-            "client_id": self.client_id, "response_type": "code", "redirect_uri": DISCORD_REDIRECT,
-            "scope": "identify guilds", "state": state, "prompt": "none"})
-
-    def invite_url(self, guild_id=None):
-        q = {"client_id": self.client_id, "scope": "bot", "permissions": str(BOT_PERMISSIONS)}
-        if guild_id:
-            q.update(guild_id=str(guild_id), disable_guild_select="true")
-        return "https://discord.com/oauth2/authorize?" + urllib.parse.urlencode(q)
-
-    def _token(self, form):
-        form = dict(form, redirect_uri=DISCORD_REDIRECT)
-        t = discord_request("POST", "/oauth2/token", form=form, basic=(self.client_id, self.secret))
-        self.d.update(access=protect(t["access_token"]), refresh=protect(t.get("refresh_token", "")),
-                      expires=time.time() + int(t.get("expires_in", 3600)) - 60)
-        self._save()
-        return t["access_token"]
-
-    def login(self, open_url):
-        state = os.urandom(12).hex()
-        open_url(self.login_url(state))
-        code = discord_wait_for_code(state)
-        access = self._token({"grant_type": "authorization_code", "code": code})
-        me = discord_request("GET", "/users/@me", bearer=access)
-        self.d["user"] = dict(id=me.get("id"), name=me.get("global_name") or me.get("username"),
-                              avatar=me.get("avatar"))
-        self._save()
-        return self.user
-
-    def access_token(self):
-        if self.d.get("access") and time.time() < float(self.d.get("expires", 0)):
-            return unprotect(self.d["access"])
-        if not self.d.get("refresh"):
-            raise DiscordError("Connect your Discord account first (Settings → Discord).")
-        try:
-            return self._token({"grant_type": "refresh_token", "refresh_token": unprotect(self.d["refresh"])})
-        except DiscordError as e:
-            if e.status in (400, 401):
-                self.forget()
-                raise DiscordError("Your Discord login expired. Log in again in Settings → Discord "
-                                   "(step 4) to see servers without the bot.") from None
-            raise
-
-    # --- servers
-    def _bot_guilds(self):
-        out, after = [], None
-        while True:
-            page = discord_request("GET", "/users/@me/guilds?limit=200" + (f"&after={after}" if after else ""), bot=self.bot)
-            out += page
-            if len(page) < 200:
-                return out
-            after = page[-1]["id"]
-
-    def _owner_can(self, gid, uid):
-        """Is `uid` in this server with permission to add emojis? (asked through the bot, no login needed)"""
-        g = discord_request("GET", f"/guilds/{gid}", bot=self.bot)
-        if str(g.get("owner_id")) == str(uid):
-            return True
-        try:
-            m = discord_request("GET", f"/guilds/{gid}/members/{uid}", bot=self.bot)
-        except DiscordError as e:
-            if e.status == 404:          # not a member of this server
-                return False
-            raise
-        roles = {str(r["id"]): int(r.get("permissions") or 0) for r in g.get("roles") or []}
-        perms = roles.get(str(gid), 0)   # @everyone
-        for rid in m.get("roles") or []:
-            perms |= roles.get(str(rid), 0)
-        return bool(perms & (PERM_ADMIN | PERM_MANAGE_EXPR | PERM_CREATE_EXPR))
-
-    def servers(self):
-        """Only YOUR servers where you can add emojis, and whether the bot is in each one.
-        Without the Discord login: the bot's servers where you (its owner) can add emojis.
-        With the login: also your servers the bot isn't in yet (shown dark, with an Invite button)."""
-        bot_guilds = self._bot_guilds()
-        bot_ids = {g["id"] for g in bot_guilds}
-        if not self.logged_in():
-            uid = self.d.get("owner_id") or ""
-            out = [dict(id=g["id"], name=g.get("name", "?"), icon=g.get("icon"), bot_in=True)
-                   for g in bot_guilds if uid and self._owner_can(g["id"], uid)]
-            out.sort(key=lambda g: g["name"].lower())
-            return out
-        mine = discord_request("GET", "/users/@me/guilds", bearer=self.access_token())
-        out = []
-        for g in mine:
-            perms = int(g.get("permissions") or 0)
-            can = g.get("owner") or perms & (PERM_ADMIN | PERM_MANAGE_EXPR | PERM_CREATE_EXPR)
-            if not can:
-                continue
-            out.append(dict(id=g["id"], name=g.get("name", "?"), icon=g.get("icon"), bot_in=g["id"] in bot_ids))
-        out.sort(key=lambda g: (not g["bot_in"], g["name"].lower()))
-        return out
-
-    def guild_info(self, gid, fresh=False):
-        """Free emoji / sticker slots in a server (needs the bot to be in it)."""
-        if not fresh and gid in self._guild_cache:
-            return self._guild_cache[gid]
-        g = discord_request("GET", f"/guilds/{gid}", bot=self.bot)
-        tier = int(g.get("premium_tier") or 0)
-        emojis = g.get("emojis") or []
-        stickers = g.get("stickers")
-        if stickers is None:
-            stickers = discord_request("GET", f"/guilds/{gid}/stickers", bot=self.bot) or []
-        lim, slim = EMOJI_LIMITS.get(tier, 50), STICKER_LIMITS.get(tier, 5)
-        info = dict(static=sum(1 for e in emojis if not e.get("animated")), animated=sum(1 for e in emojis if e.get("animated")),
-                    stickers=len(stickers), limit=lim, sticker_limit=slim, tier=tier,
-                    names={e.get("name") for e in emojis})
-        self._guild_cache[gid] = info
-        return info
-
-    def add_emoji(self, gid, name, data, ext, on_wait=None):
-        uri = f"data:image/{'gif' if ext == 'gif' else 'png'};base64," + base64.b64encode(data).decode()
-        e = discord_request("POST", f"/guilds/{gid}/emojis", bot=self.bot, json_body={"name": name, "image": uri},
-                            on_wait=on_wait)
-        self._guild_cache.pop(gid, None)
-        return e
-
-    def add_sticker(self, gid, name, data, ext, on_wait=None, tags="grinning"):
-        name = name[:30] if len(name) >= 2 else name + "_"
-        files = {"file": (f"{name}.{ext}", data, "image/gif" if ext == "gif" else "image/png")}
-        st = discord_request("POST", f"/guilds/{gid}/stickers", bot=self.bot, files=files,
-                             form={"name": name, "description": "", "tags": tags}, on_wait=on_wait)
-        self._guild_cache.pop(gid, None)
-        return st
-
-
 BACKEND_URL = "https://emotes-downloader.isdook.workers.dev"
-PUBLIC_CLIENT_ID = "1575959367180881950"     # the public "ISdook - emotes downloader" bot (not a secret)
+PUBLIC_CLIENT_ID = "1575959367180881950"     # the public "Emotes Downloader" bot (not a secret)
 
 
 def backend_request(method, path, session=None, json_body=None, form=None, files=None, on_wait=None, timeout=60):
@@ -2587,11 +2180,6 @@ def run_gui(start_hidden=False):
                 self.redraw()
 
     class App:
-        @property
-        def discord(self):
-            """The Discord connection in use: the public bot (Log in with Discord) or your own bot (Advanced)."""
-            return self.discord_own if self.cfg.get("discord_mode") == "own" else self.discord_pub
-
         def __init__(self, root):
             self.root = root
             root._emotes_app = self  # handy for tests and debugging
@@ -2617,11 +2205,14 @@ def run_gui(start_hidden=False):
             from collections import OrderedDict
             self.thumb_cache = OrderedDict()   # Browse 7TV previews; only the last THUMB_CACHE_MAX are kept
             self.dlq = queue.Queue()
-            self.discord_own = DiscordLink(self.cfg, lambda: save_config(self.cfg))
-            self.discord_pub = PublicLink(self.cfg, lambda: save_config(self.cfg))
-            if self.cfg.get("discord_mode") not in ("public", "own"):
-                # people who already linked their own bot keep it; everyone else uses the public bot
-                self.cfg["discord_mode"] = "own" if self.discord_own.connected() else "public"
+            # The old "own bot" setup is gone: forget its stored bot token / secret for good.
+            had_own_bot = bool((self.cfg.get("discord") or {}).get("bot"))
+            if "discord" in self.cfg or "discord_mode" in self.cfg:
+                self.cfg.pop("discord", None)
+                self.cfg.pop("discord_mode", None)
+                save_config(self.cfg)
+            self._own_bot_removed = had_own_bot
+            self.discord = PublicLink(self.cfg, lambda: save_config(self.cfg))
             self._last_clip = None
             self.clip_ref = None
             self.F = lambda size, bold=False: ctk.CTkFont(family=FAMILY, size=size,
@@ -3747,253 +3338,11 @@ def run_gui(start_hidden=False):
                 line(g, "Reset all settings", "Puts every option back to how it was on first start.", reset)
 
             def page_discord():
-                # re-drawing the page after a check keeps you where you were
-                y = body._parent_canvas.yview()[0] if sv.get("_on") else 0.0
                 clear()
-                sv["_on"] = True
-                body.after(80, lambda: body.winfo_exists() and body._parent_canvas.yview_moveto(y))
                 head("Discord", "Send emotes and stickers straight to your servers.")
-                mode = self.cfg.get("discord_mode", "public")
-
-                def set_mode(v):
-                    m_ = "own" if v.startswith("My own") else "public"
-                    if m_ != self.cfg.get("discord_mode"):
-                        self.cfg["discord_mode"] = m_
-                        save()
-                        page_discord()
-                seg = ctk.CTkSegmentedButton(body, values=["Log in with Discord", "My own bot (Advanced)"],
-                                             command=set_mode, height=34, font=self.F(12, True),
-                                             selected_color=C["blurple"], selected_hover_color=C["blurple_hover"],
-                                             unselected_color=C["card_hi"], unselected_hover_color=C["border"],
-                                             fg_color=C["card_hi"], text_color=C["text"])
-                seg.set("Log in with Discord" if mode != "own" else "My own bot (Advanced)")
-                seg.grid(row=2, column=0, sticky="w", pady=(0, 14))
-                if mode != "own":
-                    public_page(3)
-                    return
-                dl = self.discord
+                pub = self.discord
                 web = __import__("webbrowser").open
-                portal = "https://discord.com/developers/applications"
-
-                def page_url(sub):
-                    return f"{portal}/{dl.client_id}/{sub}" if dl.client_id else portal
-
-                def bg(work, then):
-                    def job():
-                        try:
-                            res, err = work(), None
-                        except Exception as ex:  # noqa
-                            res, err = None, ex
-                        self.ui(lambda: top.winfo_exists() and then(res, err))
-                    threading.Thread(target=job, daemon=True).start()
-
-                row = 3
-                if dl.connected():
-                    g, row = group(row, "Your bot")
-
-                    def unlink():
-                        dl.forget(everything=True)
-                        sv.clear()
-                        self.toast("Bot unlinked", "Paste a bot token again to link one.", "info")
-                        page_discord()
-                    line(g, f"Linked: {dl.bot_user.get('name') or BOT_NAME}",
-                         f"Owner: {dl.user.get('name', '?')} · the token is stored encrypted on this PC",
-                         lambda gg: self.button(gg, "Unlink", unlink, "ghost", width=100, height=32, text_color=C["bad"]))
-                    line(g, "Add the bot to a server", "It only asks for permission to add emojis and stickers.",
-                         lambda gg: self.button(gg, "Invite bot", lambda: web(dl.invite_url()), "ghost", width=110,
-                                                height=32, image=self.ico("external", C["text"], 13), compound="left"))
-                    line(g, "Open “Send to Discord” after saving", "Shows your servers as soon as an emote or sticker is saved.",
-                         switch("discord_after_save", value=self.cfg.get("discord_after_save", True)))
-
-                self.section(body, "Setup guide" if not dl.connected() else "Steps").grid(
-                    row=row, column=0, sticky="ew", pady=(4, 6))
-                row += 1
-
-                def step(num, title, desc, done, build=None, warn=None, optional=False):
-                    nonlocal row
-                    c = ctk.CTkFrame(body, fg_color=C["card"], corner_radius=14, border_width=1,
-                                     border_color=C["good"] if done else C["border"])
-                    c.grid(row=row, column=0, sticky="ew", pady=(0, 10))
-                    row += 1
-                    c.grid_columnconfigure(1, weight=1)
-                    ctk.CTkLabel(c, text="" if done else str(num), width=28, height=28, corner_radius=14,
-                                 fg_color=C["good"] if done else C["card_hi"], text_color=C["text"], font=self.F(13, True),
-                                 image=self.ico("check", "#ffffff", 14) if done else None).grid(
-                        row=0, column=0, rowspan=2, sticky="n", padx=(14, 12), pady=14)
-                    t = ctk.CTkFrame(c, fg_color="transparent")
-                    t.grid(row=0, column=1, sticky="w", pady=(14, 0), padx=(0, 14))
-                    self.label(t, title, 14, bold=True, anchor="w").pack(side="left")
-                    if optional:
-                        self.label(t, "  OPTIONAL", 10, "faint", bold=True).pack(side="left")
-                    self.label(c, desc, 12, "muted", anchor="w", justify="left", wraplength=450).grid(
-                        row=1, column=1, sticky="w", pady=(3, 0), padx=(0, 14))
-                    r = 2
-                    if warn:
-                        self.label(c, warn[0], 12, anchor="w", justify="left", wraplength=450,
-                                   text_color=C[warn[1]]).grid(row=r, column=1, sticky="w", pady=(6, 0), padx=(0, 14))
-                        r += 1
-                    if build:
-                        f = ctk.CTkFrame(c, fg_color="transparent")
-                        f.grid(row=r, column=1, sticky="w", pady=(10, 0), padx=(0, 14))
-                        build(f)
-                    ctk.CTkFrame(c, fg_color="transparent", height=14).grid(row=r + 2, column=1)
-
-                def under(f):
-                    """A second line of controls inside a step."""
-                    r_ = ctk.CTkFrame(f.master, fg_color="transparent")
-                    r_.grid(row=int(f.grid_info()["row"]) + 1, column=1, sticky="w", pady=(8, 0), padx=(0, 14))
-                    return r_
-
-                def btn(f, text, cmd, kind="ghost", icon="external", width=None):
-                    b_ = self.button(f, text, cmd, kind, height=32,
-                                     image=self.ico(icon, "#ffffff" if kind == "discord" else C["text"], 13) if icon else None,
-                                     compound="left", **({"width": width} if width else {}))
-                    b_.pack(side="left", padx=(0, 8))
-                    return b_
-
-                def field(f, key, check):
-                    e = ctk.CTkEntry(f, width=250, height=32, corner_radius=8, border_width=1, show="•",
-                                     border_color=C["border"], fg_color=C["field"], text_color=C["text"], font=self.F(12),
-                                     placeholder_text="paste here")
-                    e.pack(side="left", padx=(0, 8))
-
-                    def paste():
-                        try:
-                            v = self.root.clipboard_get().strip()
-                        except Exception:
-                            v = ""
-                        e.delete(0, "end")
-                        e.insert(0, v)
-                        check(v)
-                    btn(f, "Paste", paste, "ghost", None, 80)
-                    e.bind("<Return>", lambda _e: check(e.get()))
-                    return e
-
-                linked = dl.connected()
-                private = linked and dl.is_private()
-
-                # 1 ------------------------------------------------------------
-                step(1, "Create a Discord app",
-                     "Open the Developer Portal and log in with your Discord account. Press New Application "
-                     "(top right), type any name, for example “Emotes”, tick the box and press Create.",
-                     linked, lambda f: btn(f, "Open Developer Portal", lambda: web(portal)))
-
-                # 2 ------------------------------------------------------------
-                def link_token(v):
-                    if not (v or "").strip():
-                        return
-                    sv["token_msg"] = ("Linking your bot…", "muted")
-                    page_discord()
-
-                    def work():
-                        dl.link(v)                    # finds the app + owner, tries to make it private
-                        try:
-                            dl.brand()                # name "ISdook - emotes downloader" + GitHub picture
-                        except Exception as ex:  # noqa (Discord rate-limits renames; retried on next start)
-                            self.log_lines.append(f"Bot name/picture not updated yet: {ex}")
-                        if dl.is_private():
-                            web(dl.invite_url())      # straight to adding the bot to your server
-                            sv["invited"] = True
-                        return dl.user
-
-                    def then(user, err):
-                        sv["token_msg"] = (str(err), "bad") if err else (
-                            f"Linked! Owner: {user.get('name', 'you')}.", "good")
-                        if not err:
-                            self.toast("Bot linked", "Now pick a server for it in your browser." if dl.is_private()
-                                       else "One more step: make the bot private.", "ok")
-                        page_discord()
-                    bg(work, then)
-                step(2, "Copy the bot token and paste it here",
-                     "On the left, open Bot. Press Reset Token, then “Yes, do it!” (Discord may ask for your "
-                     "password or 2-factor code). Press Copy, come back here and press Paste. "
-                     "That's all the app needs: it finds everything else by itself. "
-                     "Keep the token secret, it's the bot's password.",
-                     linked, (lambda f: (btn(f, "Open Bot page", lambda: web(page_url("bot"))),
-                                         field(under(f), "token", link_token))) if not linked else None,
-                     warn=sv.get("token_msg"))
-
-                # 3 ------------------------------------------------------------
-                def check_private():
-                    sv["priv_msg"] = ("Checking…", "muted")
-                    page_discord()
-
-                    def work():
-                        dl.check_bot()
-                        if dl.is_private() and not sv.get("invited"):
-                            web(dl.invite_url())
-                            sv["invited"] = True
-                        return dl.is_private()
-
-                    def then(ok, err):
-                        sv["priv_msg"] = (str(err), "bad") if err else (None if ok else (
-                            "Still public. Turn off Public Bot, press Save Changes, then Check again.", "bad"))
-                        page_discord()
-                    bg(work, then)
-                step(3, "Make the bot private",
-                     "Done for you if Discord allows it. If not: on the Bot page turn off “Public Bot” and press "
-                     "Save Changes, so only you can add it to servers.\n\nIf Discord says “Private application "
-                     "cannot have a default authorization link”: open Installation on the left, set Install Link "
-                     "to None, press Save Changes, then turn off Public Bot again.",
-                     private,
-                     (lambda f: (btn(f, "Open Bot page", lambda: web(page_url("bot"))),
-                                 btn(f, "Open Installation", lambda: web(page_url("installation"))),
-                                 btn(f, "Check", check_private, "ghost", "refresh", 90))) if linked and not private else None,
-                     warn=sv.get("priv_msg") or (("Private: only you can add this bot.", "good") if private else None))
-
-                # 4 ------------------------------------------------------------
-                step(4, "Add the bot to your server",
-                     "It opens by itself after steps 2 and 3. Pick your server and press Authorize. "
-                     "You can add it to more servers any time.",
-                     bool(sv.get("invited")) or (linked and private and "token_msg" not in sv),
-                     (lambda f: btn(f, "Invite bot", lambda: (web(dl.invite_url()), sv.update(invited=True), page_discord()),
-                                    "discord", "external", 130)) if private else None)
-
-                # 5 (optional) -----------------------------------------------
-                def copy_redirect():
-                    self.root.clipboard_clear()
-                    self.root.clipboard_append(DISCORD_REDIRECT)
-                    sv["login_msg"] = ("Link copied. Paste it under Redirects and press Save Changes.", "good")
-                    page_discord()
-
-                def login(v):
-                    try:
-                        dl.set_secret(v)
-                    except DiscordError as ex:
-                        sv["login_msg"] = (str(ex), "bad")
-                        page_discord()
-                        return
-                    sv["login_msg"] = ("Log in to Discord in your browser and press Authorize…", "muted")
-                    page_discord()
-
-                    def then(user, err):
-                        msg = str(err) if err else ""
-                        if err and "redirect" in msg.lower():
-                            msg += " Check that the link is saved under Redirects exactly as shown."
-                        sv["login_msg"] = (msg, "bad") if err else (f"Logged in as {user.get('name')}.", "good")
-                        page_discord()
-                    bg(lambda: dl.login(web), then)
-
-                def logout():
-                    dl.forget()
-                    sv.pop("login_msg", None)
-                    page_discord()
-                step(5, "See all your servers",
-                     "Without this, “Send to Discord” lists the servers where your bot already is. To also see "
-                     "your servers without the bot (dark, with an Invite button), log in with Discord once:\n"
-                     f"• OAuth2 page → Redirects → Add Redirect → paste {DISCORD_REDIRECT} → Save Changes\n"
-                     "• Same page → Client Secret → Reset Secret → Copy, then Paste here",
-                     dl.logged_in(),
-                     (lambda f: btn(f, "Log out", logout, "ghost", None, 90)) if dl.logged_in() else
-                     (lambda f: (btn(f, "Copy link", copy_redirect, "ghost", None, 100),
-                                 btn(f, "Open OAuth2 page", lambda: web(page_url("oauth2"))),
-                                 field(under(f), "secret", login))) if linked else None,
-                     warn=sv.get("login_msg") or ((f"Logged in as {dl.user.get('name')}.", "good") if dl.logged_in()
-                                                  else None), optional=True)
-
-            def public_page(row):
-                pub = self.discord_pub
-                web = __import__("webbrowser").open
+                row = 2
                 if not pub.connected():
                     g, row = group(row, "Log in")
                     line(g, "Log in with Discord", "Your browser opens Discord's login page. Press Authorize and "
@@ -4004,9 +3353,10 @@ def run_gui(start_hidden=False):
                     g2, row = group(row, "How it works")
                     for t_, d_ in (("Only your servers", "You only see servers where you can add emojis. Nobody else "
                                     "sees yours, and the server checks your permission for every emote."),
-                                   ("One bot for everyone", "The bot “ISdook - emotes downloader” adds the emotes. "
+                                   ("One bot for everyone", "The bot “Emotes Downloader” adds the emotes. "
                                     "It can only add and manage emojis and stickers."),
-                                   ("Prefer your own bot?", "Choose “My own bot (Advanced)” above.")):
+                                   ("Dashboard and /emote", "You can also add emotes on the website or with "
+                                    "/emote add in your server. Wide emotes are cut into pieces.")):
                         line(g2, t_, d_, lambda gg: ctk.CTkFrame(gg, width=1, height=1, fg_color="transparent"), wrap=440)
                     return
                 g, row = group(row, "Your Discord")
@@ -4030,15 +3380,11 @@ def run_gui(start_hidden=False):
                 line(g, "Open “Send to Discord” after saving", "Shows your servers as soon as an emote or sticker is saved.",
                      switch("discord_after_save", value=self.cfg.get("discord_after_save", True)))
 
-            # shared state of the setup guide (kept while you switch pages)
-            sv = self._dc_setup = getattr(self, "_dc_setup", None) or {}
-
             pages = {"General": ("gear", page_general), "Saving": ("folder", page_saving),
                      "Discord": ("send", page_discord), "Updates": ("refresh", page_updates),
                      "About": ("external", page_about)}
 
             def go(name):
-                sv["_on"] = False
                 for n_, b_ in navs.items():
                     on = n_ == name
                     b_.configure(fg_color=C["card_hi"] if on else "transparent",
@@ -4780,7 +4126,7 @@ def run_gui(start_hidden=False):
 
             def job():
                 try:
-                    user, err = self.discord_pub.login(__import__("webbrowser").open, switch=switch), None
+                    user, err = self.discord.login(__import__("webbrowser").open, switch=switch), None
                 except Exception as e:  # noqa
                     user, err = None, e
 
@@ -4790,8 +4136,6 @@ def run_gui(start_hidden=False):
                         self.say(f"Discord login didn't finish: {err}", "err")
                         self.toast("Discord login didn't finish", str(err), "err")
                     else:
-                        self.cfg["discord_mode"] = "public"
-                        save_config(self.cfg)
                         self.say(f"Logged in to Discord as {user.get('name')}.", "ok")
                         self.toast("Logged in to Discord", f"Hi {user.get('name')}! Pick a server when you send emotes.", "ok")
                     if then:
@@ -4802,24 +4146,14 @@ def run_gui(start_hidden=False):
         def _need_discord(self):
             if self.discord.connected():
                 return False
-            if self.cfg.get("discord_mode") != "own":
-                self.text_dialog("Send to Discord", "Log in with Discord first",
-                                 "One click, and you only do it once.",
-                                 "Your browser opens Discord's login page. Press Authorize, and you'll see all your "
-                                 "servers here.\n\nServers where the Emotes Downloader bot isn't yet get an Invite "
-                                 "button. The bot can only add and manage emojis and stickers, and you only ever see "
-                                 "your own servers.",
-                                 [("Not now", "ghost", None), ("Log in with Discord", "discord",
-                                                               lambda: self.discord_login())])
-                return True
-            self.text_dialog("Send to Discord", "Connect Discord first",
-                             "Takes about two minutes, and you only do it once.",
-                             "Emotes Downloader adds emotes and stickers with your own private Discord bot.\n\n"
-                             "Discord settings has a step-by-step guide: you make a free Discord app and "
-                             "paste its bot token. That's all, and every step is checked for you as you go. "
-                             "Then every emote you save can go straight to your servers.",
-                             [("Not now", "ghost", None), ("Start the setup guide", "discord",
-                                                           lambda: self.open_settings("Discord"))])
+            self.text_dialog("Send to Discord", "Log in with Discord first",
+                             "One click, and you only do it once.",
+                             "Your browser opens Discord's login page. Press Authorize, and you'll see all your "
+                             "servers here.\n\nServers where the Emotes Downloader bot isn't yet get an Invite "
+                             "button. The bot can only add and manage emojis and stickers, and you only ever see "
+                             "your own servers.",
+                             [("Not now", "ghost", None), ("Log in with Discord", "discord",
+                                                           lambda: self.discord_login())])
             return True
 
         def on_send_discord(self):
@@ -4950,7 +4284,7 @@ def run_gui(start_hidden=False):
             acc = ctk.CTkFrame(right, fg_color="transparent")
             acc.grid(row=0, column=0, sticky="ew", pady=(0, 8))
             self.label(acc, "CHOOSE A SERVER", 11, "muted", bold=True).pack(side="left")
-            self.label(acc, f"   {'signed in as' if dl.logged_in() else 'bot owner:'} {dl.user.get('name', '?')}",
+            self.label(acc, f"   signed in as {dl.user.get('name', '?')}",
                        11, "faint").pack(side="left")
             self.button(acc, "Refresh", lambda: load(fresh=True), "flat", width=90, height=26,
                         image=self.ico("refresh", C["muted"], 13), compound="left").pack(side="right")
@@ -5106,28 +4440,13 @@ def run_gui(start_hidden=False):
             def invited():
                 warn.configure(text="After adding the bot in your browser, press Refresh.", text_color=C["muted"])
 
-            def add_more():
-                """Without the Discord login, servers without the bot can't be listed: offer to add it anywhere."""
-                if dl.logged_in():
-                    return
-                f = ctk.CTkFrame(lst, fg_color="transparent")
-                f.pack(fill="x", padx=8, pady=(6, 8))
-                self.button(f, "Add the bot to another server", lambda: (
-                    __import__("webbrowser").open(dl.invite_url()), invited()),
-                    "ghost", height=34, image=self.ico("external", C["text"], 13), compound="left").pack(anchor="w")
-                self.label(f, "Tip: log in with Discord in Discord settings to see all your servers here.",
-                           11, "faint", anchor="w", wraplength=440, justify="left").pack(anchor="w", pady=(4, 0))
-
             def build(servers):
                 for w in lst.winfo_children():
                     w.destroy()
                 st["rows"] = {}
                 if not servers:
-                    self.label(lst, ("No servers where you can add emojis.\nYou need “Manage Expressions” or "
-                                     "“Create Expressions” in a server.") if dl.logged_in() else
-                               "The bot isn't in any of your servers yet.\nAdd it with the button below, then press Refresh.",
-                               13, "muted", justify="center").pack(pady=(30, 10))
-                    add_more()
+                    self.label(lst, "No servers where you can add emojis.\nYou need “Manage Expressions” or "
+                                    "“Create Expressions” in a server.", 13, "muted", justify="center").pack(pady=(30, 10))
                     return
                 for g in servers:
                     inside = g["bot_in"]
@@ -5162,7 +4481,6 @@ def run_gui(start_hidden=False):
                                     compound="left").grid(row=0, column=2, rowspan=2, padx=12)
                     st["rows"][g["id"]] = row
                     fetch_icon(g)
-                add_more()
                 firsts = [g for g in servers if g["bot_in"]]
                 if st["sel"] and st["sel"] in st["rows"] and st["rows"][st["sel"]]["bot_in"]:
                     select(st["sel"])
@@ -6263,16 +5581,10 @@ def run_gui(start_hidden=False):
                 save_config(self.cfg)
             if self.cfg.get("check_updates", True):
                 self.root.after(1200, lambda: self.check_updates(manual=False))
-            if self.cfg.get("discord_mode") == "own" and self.discord_own.connected():
-                def keep_bot():
-                    try:
-                        self.discord_own.check_bot()
-                        changed = self.discord_own.brand()
-                        if changed:
-                            self.log_lines.append(f"Bot {', '.join(changed)} set back to {BOT_NAME}.")
-                    except Exception as e:  # noqa
-                        self.log_lines.append(f"Couldn't check the Discord bot: {e}")
-                threading.Thread(target=keep_bot, daemon=True).start()
+            if getattr(self, "_own_bot_removed", False) and not self.discord.connected():
+                self.root.after(2500, lambda: self.toast(
+                    "Discord got simpler", "Your own bot isn't needed anymore. Log in with Discord in "
+                    "Settings → Discord.", "info", ms=9000))
 
         def _set_update_btn(self, text, kind="ghost", icon=None):
             styles = {"ghost": (C["card_hi"], C["border"], C["text"]),

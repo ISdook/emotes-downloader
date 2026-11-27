@@ -8,7 +8,7 @@ A Windows desktop app by ISdook that downloads 7TV emotes and turns them into Di
 - a Converter tab for your own files
 - a Browse 7TV window
 - a tray icon with a flyout panel
-- a private Discord bot that adds emotes to the user's servers
+- "Log in with Discord" and a public bot that adds emotes to the user's servers (plus a dashboard website and `/emote add`)
 - an auto-updater that installs new versions from GitHub Releases
 
 Users are mostly Arabic speakers on Windows 10/11. Expect Arabic letters in paths and user names.
@@ -22,7 +22,7 @@ Everything is in one file, **`emotes_downloader.py`** (~5,700 lines). The sectio
 | top | `__version__`, constants, quality tiers, 7TV API (`EmoteRef`, `fetch_*`, `search_emotes`, `download_emote`, `fetch_thumb*`) |
 | `# Image processing` | `load_frames`, `plan_grid`, `compose`, GIF/PNG encoding (shared palette, delta frames), `make_emote` |
 | `# Converter` | `convert_media`, ffmpeg download (`NeedFFmpeg`, `install_ffmpeg`), `collect_media` |
-| `# Discord` | REST helper `discord_request`, DPAPI `protect`/`unprotect`, OAuth callback server, `DiscordLink` |
+| `# Discord` | DPAPI `protect`/`unprotect`, local login catcher `discord_wait_for_code`, `backend_request`, `PublicLink` |
 | `# Auto-updater` | `check_for_update`, `apply_update`, portable swap (`finish_portable_update`, `portable_handoff`, `cleanup_after_update`), changelog |
 | `# Settings` | `DEFAULTS`, `load_config`/`save_config`, save-location presets |
 | `# Icons` | `draw_icon`: every icon is drawn with Pillow (no icon files) |
@@ -75,7 +75,7 @@ The owner (ISdook) has given standing permission to publish releases without ask
 
 ## Discord feature rules (from the owner)
 
-Two modes (Settings → Discord, `cfg["discord_mode"]`): **public** (default: `PublicLink`, Log in with Discord, the shared bot through the backend) and **own** (Advanced: `DiscordLink`, the user's own bot). `App.discord` returns the one in use.
+Only one mode: **Log in with Discord** with the public bot (`PublicLink`, `App.discord`). The old "own bot" mode (`DiscordLink`) was removed in v1.12.0 at the owner's request; on start the app deletes any old `cfg["discord"]` (own bot token) and shows a one-time hint to log in.
 
 Public bot / backend rules (non-negotiable):
 - The bot token and client secret never go in the app. The app only sends its session token (Bearer) to the backend.
@@ -85,16 +85,13 @@ Public bot / backend rules (non-negotiable):
 - Desktop login: `/auth/app?state&challenge` → Discord → `/auth/callback` → one-time ticket to `http://127.0.0.1:53682/callback` → `/auth/redeem` with the verifier.
 - Test the backend with `wrangler dev` against a fake Discord (see `tests/backend` in earlier sessions: `fake.mjs`, `run.mjs`).
 
-Own-bot mode:
-- Each user creates their own bot in the Developer Portal. Linking needs only the bot token: `DiscordLink.link()` finds the app ID and owner from it. Logging in with Discord (OAuth, redirect `http://127.0.0.1:53682/callback`) is optional and only adds servers without the bot to the list.
-- The bot must stay private to its owner:
-  - `guard()` runs before every send. It checks that Public Bot is off, that the user is the owner, and that the server is the user's own with emoji permission.
-  - List only the user's own servers, never every server the bot is in.
-  - The bot has no commands and never connects to the gateway.
-- The bot's name and picture are fixed: **"ISdook - emotes downloader"** with the ISdook GitHub avatar. `brand()` puts them back on every start.
+Bot rules:
+- The bot is named **Emotes Downloader** and uses the app icon. `backend/scripts/setup-discord.mjs` sets the name, picture and bio after every deploy. The picture is uploaded only when the name changes, or when you run the Backend workflow by hand with **force_picture** (Discord limits picture changes). `backend/src/web/icon.png` must be a copy of `assets/icon.png`.
+- The bio (`src/profile.js`, ≤ 400 characters) has the GitHub link, "Made by ISdook" and the server count. A cron every 30 minutes updates the count. `/api/stats` gives only the number, never the server list.
+- Wide 7TV emotes are cut into pieces (`src/pieces.js`, same rule as `auto_grid`, max 8) by the **Cloudflare Images binding** (`env.IMAGES`), because the Worker has only 10 ms of CPU on the free plan. `wrangler dev` can't make GIFs ("not supported in local mode"), so locally it falls back to one piece with a note. Test the real cut after deploying. Free plan: 5,000 different transformations a month; when it fails the emote is added in one piece.
 - Show results line by line: green for success, red with the reason for failure.
 - **Send to Discord** sends all ticked Files (`_checked()`), or the current one if none are ticked. Panel items are dicts (`name`, `ext`, `path` or `data`, `kb`, `status`, `msg`); files are read only when sent. One failure never stops the batch; full slots are skipped locally; long 429s are waited out with a countdown and **Stop**; Send again retries only items not added.
-- Secrets are stored with Windows DPAPI (`protect`). Never log or commit tokens.
+- The login (session) is stored with Windows DPAPI (`protect`). Never log or commit tokens.
 
 ## Testing (no Windows here, so test headless)
 

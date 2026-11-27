@@ -4,6 +4,7 @@
 name = "emotes-downloader"
 main = "src/index.js"
 compatibility_date = "2024-11-01"
+compatibility_flags = ["nodejs_compat"]
 workers_dev = true
 
 [vars]
@@ -12,6 +13,7 @@ DISCORD_CLIENT_ID = "1575959367180881950"
 DISCORD_PUBLIC_KEY = "faca44893aedbf9a39d555c07dfd182b6fe71abc905fe899d07fb842913cc947"
 DISCORD_API = "https://discord.com/api/v10"
 SEVENTV_API = "https://7tv.io/v3"
+PUBLIC_URL = "https://emotes-downloader.isdook.workers.dev"
 
 [[d1_databases]]
 binding = "DB"
@@ -19,12 +21,21 @@ database_name = "emotes-downloader"
 database_id = "SET_BY_DEPLOY"
 migrations_dir = "migrations"
 
-# Clean up old logins and tickets once a day.
+# Cloudflare Images: cuts wide 7TV emotes into pieces (free plan: 5,000 different cuts a month).
+[images]
+binding = "IMAGES"
+
+# 03:17 every day: clean up old logins and tickets. Every 30 minutes: the bot's bio with the server count.
 [triggers]
-crons = ["17 3 * * *"]
+crons = ["17 3 * * *", "*/30 * * * *"]
 
 # The dashboard's page, styles and browser script are bundled as text.
 [[rules]]
 type = "Text"
 globs = ["**/*.html", "**/*.css", "**/*.client.js"]
+fallthrough = false
+
+[[rules]]
+type = "Data"
+globs = ["**/*.png"]
 fallthrough = false

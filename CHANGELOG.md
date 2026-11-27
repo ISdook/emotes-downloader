@@ -2,6 +2,18 @@
 
 Every release gets an entry here. The release build fails without one, and the text becomes the GitHub release notes and the app's "What's new" window.
 
+## v1.12.0 — 2026-11-27
+- **The bot is now called "Emotes Downloader"** and has the same picture as the app
+- **The "My own bot (Advanced)" mode is gone.** Log in with Discord is the only way now. It's simpler and safer
+  - If you used your own bot, the app deletes its saved token and shows a short hint. Press **Log in with Discord** in Settings → Discord to keep sending emotes
+  - You can delete your old bot in the Discord Developer Portal. The app doesn't use it anymore
+- **`/emote add` and the dashboard cut wide emotes into pieces by themselves.** KEKW becomes `:KEKW1: :KEKW2: :KEKW3: :KEKW4:`. Type them together to show the whole emote
+  - Each piece needs a free emoji slot. If there aren't enough, the bot tells you how many are free and adds nothing
+  - Don't want pieces? Untick **Cut wide emotes into pieces** on the website, or use `/emote add cut:False`
+  - Emotes that are too big for Discord are made smaller instead of failing
+- The website shows how many servers use the bot, live
+- The bot's profile shows the server count, the GitHub page and the developer's name, ISdook
+
 ## v1.11.0 — 2026-11-27
 - **Log in with Discord: no more making your own bot.** Settings → Discord → **Log in with Discord**. Your browser opens Discord, you press Authorize, and you're done
   - The public bot **ISdook - emotes downloader** adds your emotes. It can only add and manage emojis and stickers

@@ -1,16 +1,19 @@
 // Runs after every deploy (GitHub Actions). Uses DISCORD_BOT_TOKEN from the environment; prints no secrets.
 //  * registers the /emote command (add, dashboard)
 //  * points Discord's "Interactions Endpoint URL" at the Worker (Discord checks it right away)
-//  * keeps the bot's name "ISdook - emotes downloader" and the ISdook GitHub picture
+//  * keeps the bot's name and picture the same as the app ("Emotes Downloader", assets/icon.png)
+//  * sets the bio (GitHub link, developer, server count). The Worker refreshes the count every 30 minutes.
+// The picture is only uploaded when the name changes or FORCE_PICTURE=1 (Discord limits picture changes).
 import { readFileSync } from "node:fs";
+import { BOT_NAME, botBio } from "../src/profile.js";
 
 const API = "https://discord.com/api/v10";
 const TOKEN = process.env.DISCORD_BOT_TOKEN;
 const PUBLIC_URL = (process.env.PUBLIC_URL || "").replace(/\/$/, "");
-const NAME = "ISdook - emotes downloader";
-const AVATAR = "https://avatars.githubusercontent.com/u/221166014?s=512";
-const DESCRIPTION = "Adds 7TV emotes to your server. Type /emote add, or manage your server's emojis at "
-  + `${PUBLIC_URL}/dashboard`;
+const NAME = BOT_NAME;
+const ICON = readFileSync(new URL("../src/web/icon.png", import.meta.url));     // same picture as the app
+const ICON_URI = `data:image/png;base64,${ICON.toString("base64")}`;
+const FORCE_PICTURE = process.env.FORCE_PICTURE === "1" || process.env.FORCE_PICTURE === "true";
 
 const toml = readFileSync(new URL("../wrangler.toml", import.meta.url), "utf8");
 const CLIENT_ID = /DISCORD_CLIENT_ID\s*=\s*"(\d+)"/.exec(toml)?.[1];
@@ -49,6 +52,7 @@ await call("PUT", `/applications/${CLIENT_ID}/commands`, [{
       options: [
         { type: 3, name: "link", description: "7TV emote link, like https://7tv.app/emotes/…", required: true },
         { type: 3, name: "name", description: "Emoji name (optional: letters, numbers and _)", required: false, max_length: 32 },
+        { type: 5, name: "cut", description: "Cut wide emotes into pieces like :name1: :name2: (default: yes)", required: false },
       ],
     },
     { type: 1, name: "dashboard", description: "Open the Emotes Downloader dashboard" },
@@ -58,6 +62,7 @@ console.log("✓ /emote command registered");
 
 // 2. Interactions endpoint. A new workers.dev address can take a few minutes to start answering.
 const app = await call("GET", "/applications/@me");
+const DESCRIPTION = botBio(PUBLIC_URL, app.approximate_guild_count);
 const want = `${PUBLIC_URL}/interactions`;
 const patch = {};
 if (app.interactions_endpoint_url !== want) patch.interactions_endpoint_url = want;
@@ -77,26 +82,26 @@ if (Object.keys(patch).length) {
 }
 console.log("✓ interactions URL and description set");
 
-// 3. Bot name and picture (Discord limits renames, so only when they differ)
+// 3. Bot name and picture, the same as the app (Discord limits renames, so only when they differ)
 const me = await call("GET", "/users/@me");
+const renamed = me.username !== NAME;
 const userPatch = {};
-if (me.username !== NAME) userPatch.username = NAME;
-if (!me.avatar) {
-  const img = Buffer.from(await (await fetch(AVATAR)).arrayBuffer());
-  userPatch.avatar = `data:image/png;base64,${img.toString("base64")}`;
-}
+if (renamed) userPatch.username = NAME;
+if (renamed || FORCE_PICTURE || !me.avatar) userPatch.avatar = ICON_URI;
 if (Object.keys(userPatch).length) {
   try {
     await call("PATCH", "/users/@me", userPatch);
-    console.log("✓ bot name / picture updated");
+    console.log(`✓ bot ${Object.keys(userPatch).join(" and ")} updated`);
   } catch (e) {
     console.log(`! bot name / picture not changed: ${e.message.slice(0, 200)}`);
+    if (userPatch.username && userPatch.avatar) {            // try the picture on its own
+      try { await call("PATCH", "/users/@me", { avatar: ICON_URI }); console.log("✓ bot picture updated"); } catch { /* keep going */ }
+    }
   }
 }
-if (!app.icon) {
+if (renamed || FORCE_PICTURE || !app.icon) {
   try {
-    const img = Buffer.from(await (await fetch(AVATAR)).arrayBuffer());
-    await call("PATCH", "/applications/@me", { icon: `data:image/png;base64,${img.toString("base64")}` });
+    await call("PATCH", "/applications/@me", { icon: ICON_URI });
     console.log("✓ app icon set");
   } catch (e) {
     console.log(`! app icon not set: ${e.message.slice(0, 200)}`);

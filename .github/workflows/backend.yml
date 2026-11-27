@@ -5,13 +5,18 @@ name: Backend
 #
 # Needs these repository secrets (Settings → Secrets and variables → Actions):
 #   CLOUDFLARE_API_TOKEN    Cloudflare token with Workers Scripts: Edit and D1: Edit
-#   DISCORD_BOT_TOKEN       Bot page of the "ISdook - emotes downloader" Discord app
+#   DISCORD_BOT_TOKEN       Bot page of the "Emotes Downloader" Discord app
 #   DISCORD_CLIENT_SECRET   OAuth2 page of the same app
 on:
   push:
     branches: [main]
     paths: ["backend/**", ".github/workflows/backend.yml"]
   workflow_dispatch:
+    inputs:
+      force_picture:
+        description: "Upload the bot picture again (after changing assets/icon.png)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -75,5 +80,9 @@ jobs:
           npx wrangler secret bulk secrets.json
           rm -f secrets.json
 
-      - name: Discord setup (commands, interactions URL, bot name and picture)
-        run: node scripts/setup-discord.mjs
+      - name: Discord setup (commands, interactions URL, bot name, picture and bio)
+        env:
+          FORCE_PICTURE: ${{ inputs.force_picture && '1' || '' }}
+        run: |
+          cmp -s ../assets/icon.png src/web/icon.png || echo "::warning::backend/src/web/icon.png is not the same as assets/icon.png"
+          node scripts/setup-discord.mjs

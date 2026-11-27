@@ -129,15 +129,35 @@
         el("div", { class: "row" },
           ME ? el("a", { href: "/dashboard", "data-nav": true, class: "btn big" }, "Open my servers")
              : el("a", { href: "/login", class: "btn discord big" }, "Log in with Discord"),
-          el("a", { href: "/api/invite", class: "btn ghost big", id: "addbot" }, "Add the bot to a server"))),
+          el("a", { href: "/api/invite", class: "btn ghost big", id: "addbot" }, "Add the bot to a server")),
+        el("p", { class: "count", id: "count", hidden: true })),
       el("section", { class: "features" },
         feat("Only your servers", "You only see servers where you can add emojis. Nobody else sees yours."),
-        feat("Add from 7TV", "Paste a 7TV emote link and it's in your server, or type /emote add in Discord."),
+        feat("Add from 7TV", "Paste a 7TV emote link, or type /emote add in Discord. Wide emotes are cut into pieces like :KEKW1: :KEKW2:."),
         feat("Manage emojis", "See every emoji and free slots, rename or delete them in one place."),
-        feat("Desktop app", "For big batches, cutting wide emotes into pieces and your own files, get the free Windows app.")));
+        feat("Desktop app", "For big batches, stickers and your own files, get the free Windows app.")));
+    liveCount();
     fetch("/api/config").then(function (r) { return r.json(); }).then(function (c) {
       var a = document.getElementById("addbot");
       if (a && c.invite) a.href = c.invite;
+    });
+  }
+
+  // Live "used in N servers" counter on the landing page (refreshes every 30 seconds while it's open).
+  var countTimer = null;
+  function liveCount() {
+    clearTimeout(countTimer);
+    var c = document.getElementById("count");
+    if (!c) return;
+    fetch("/api/stats").then(function (r) { return r.json(); }).then(function (d) {
+      if (typeof d.servers !== "number") return;
+      clear(c);
+      c.appendChild(el("span", { class: "dot" }));
+      c.appendChild(el("b", { text: d.servers.toLocaleString("en-US") }));
+      c.appendChild(document.createTextNode(d.servers === 1 ? " server uses the bot" : " servers use the bot"));
+      c.hidden = false;
+    }).catch(function () {}).then(function () {
+      if (document.getElementById("count")) countTimer = setTimeout(liveCount, 30000);
     });
   }
 
@@ -188,12 +208,20 @@
       };
       var link = el("input", { type: "text", placeholder: "Paste a 7TV emote link, e.g. https://7tv.app/emotes/…" });
       var nameIn = el("input", { type: "text", placeholder: "Name (optional)", maxlength: "32" });
+      var cutBox = el("input", { type: "checkbox", checked: true });
+      var cutRow = el("label", { class: "check" }, cutBox, " Cut wide emotes into pieces (:name1: :name2: …)");
       var addBtn = el("button", { class: "btn", onclick: function () {
         if (!link.value.trim()) { link.focus(); return; }
         addBtn.disabled = true; addBtn.textContent = "Adding…";
-        api("POST", "/api/guilds/" + gid + "/7tv", { link: link.value.trim(), name: nameIn.value.trim() || undefined })
+        api("POST", "/api/guilds/" + gid + "/7tv", { link: link.value.trim(), name: nameIn.value.trim() || undefined, cut: cutBox.checked })
           .then(function (r) {
-            addLine(true, "Added :" + r.emoji.name + ":" + (r.wide ? " (wide emote: the desktop app can cut it into pieces)" : ""));
+            var names = (r.emojis || [r.emoji]).map(function (e) { return ":" + e.name + ":"; });
+            if (r.pieces > 1) {
+              addLine(true, "Added in " + r.pieces + " pieces: " + names.join(" ") + ". Type them together to show the whole emote.");
+            } else {
+              addLine(true, "Added " + names[0] + (r.note ? ". " + r.note : ""));
+            }
+            if (r.error) addLine(false, "Only " + names.length + " of " + r.pieces + " pieces were added: " + r.error);
             link.value = ""; nameIn.value = ""; reload();
           })
           .catch(function (e) { addLine(false, e.message); })
@@ -304,7 +332,7 @@
           el("a", { href: "/dashboard", "data-nav": true, class: "btn ghost" }, "← All servers")),
         bars,
         el("h2", { text: "Add emotes" }),
-        el("div", { class: "card" }, el("div", { class: "addrow" }, link, nameIn, addBtn), drop, fileIn, result),
+        el("div", { class: "card" }, el("div", { class: "addrow" }, link, nameIn, addBtn), cutRow, drop, fileIn, result),
         tabs, listBox);
     }).catch(function (e) {
       show(el("div", { class: "card center pad" }, el("p", { class: "bad", text: e.message }),
