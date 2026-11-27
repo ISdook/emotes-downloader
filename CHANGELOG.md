@@ -2,6 +2,14 @@
 
 Every release gets an entry here. The release build fails without one, and the text becomes the GitHub release notes and the app's "What's new" window.
 
+## v1.8.0 — 2026-11-27
+- Linking your bot is much simpler: paste **one** thing, the bot token. The app finds your Discord app and your account from it, makes the bot private when Discord allows it, names it and opens the invite page
+- New step-by-step setup guide in Settings → Discord. Each step has buttons that open the right Developer Portal page, a Paste button, and turns green when it's done. It also explains the "Private application cannot have a default authorization link" error and how to fix it
+- **Discord settings** link under **Send to Discord** (Emotes tab and Converter)
+- Logging in with Discord is now optional. Without it, "Send to Discord" lists your servers where the bot already is, with an "Add the bot to another server" button. With it, your servers without the bot show too (dark, with Invite bot)
+- Still only your servers: without the login, the app asks Discord which of the bot's servers you're in and can add emojis to
+- The Emotes tab controls are a little more compact so everything fits
+
 ## v1.7.1 — 2026-11-27
 - Send to Discord is now locked to you. Before every send, the app checks with Discord that:
   - your bot is still private (Public Bot off)

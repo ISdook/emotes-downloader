@@ -122,23 +122,27 @@ Then you can **Try again** or pick another server. You can also open the panel a
 
 ### Set up your private bot (once, about 2 minutes)
 
-The bot belongs to **your** Discord account, so nobody else can use it. You don't need to host anything: the app sends the emotes itself, so the bot only works while the app is open.
+Discord doesn't let apps add emojis for a normal account login, so the app uses a bot that you create. The bot is yours alone: no other user can invite it, use it or see it in their app. You don't need to host anything: the app sends the emotes itself, so the bot only works while the app is open.
 
-1. Open **Settings → Discord** and press **Open portal**. On the [Discord Developer Portal](https://discord.com/developers/applications), press **New Application** and give it any name.
-2. On the **Bot** page:
-   - turn **Public Bot** **off**, so only you can add it to servers
-   - press **Reset Token** and copy the token
-3. On the **OAuth2** page:
-   - under **Redirects**, add `http://127.0.0.1:53682/callback` (the app has a **Copy** button)
-   - copy the **Client ID** and the **Client Secret**
-4. Paste the Application ID, Client Secret and Bot Token into the app and press **Connect my Discord account**.
-5. Discord's login page opens in your browser. Approve it, and then the invite page opens by itself. Choose your server.
+Open **Settings → Discord** (or press **Discord settings** under **Send to Discord**). The setup guide walks you through it, and each step turns green when it's done:
 
-**Name and picture:** the app names the bot **ISdook - emotes downloader** and gives it the ISdook GitHub picture. It checks both on every start and puts them back if they were changed.
+![The Discord setup guide](docs/discord-setup.png)
 
-**Privacy check:** Settings shows **Private ✓** when only you can add the bot. If **Public Bot** is on, or the app belongs to a different account, it shows a red warning and a **Fix** button.
+1. **Create a Discord app.** Press **Open Developer Portal** and log in with your Discord account. Press **New Application** (top right), type any name, for example `Emotes`, tick the box and press **Create**.
+2. **Copy the bot token and paste it.** In the portal, open **Bot** on the left. Press **Reset Token**, then **Yes, do it!** (Discord may ask for your password or 2-factor code). Press **Copy**, then **Paste** in the app.
 
-**Only you can use it:** the bot has no commands and never goes online, so other people in your server can't do anything with it. The server list comes from **your** Discord login, so it only shows your servers, never other servers the bot might be in. Before every send, the app checks with Discord that the bot is still private, that you're logged in as its owner, and that the server is yours. If one of these fails, nothing is sent and a red line says why.
+   That's the only thing you paste. The app finds your app and your account from the token, renames the bot to **ISdook - emotes downloader**, gives it the ISdook GitHub picture, and opens the invite page. Keep the token secret, because it's the bot's password.
+3. **Make the bot private.** The app tries to do this for you. If it can't, the step stays open: on the **Bot** page, turn off **Public Bot**, press **Save Changes**, then press **Check** in the app.
+
+   > If Discord says **"Private application cannot have a default authorization link"**: open **Installation** on the left, set **Install Link** to **None**, press **Save Changes**, then turn off **Public Bot** again.
+4. **Add the bot to your server.** The invite page opens by itself. Pick your server and press **Authorize**. Add it to more servers any time with **Invite bot**.
+5. **See all your servers** (optional). Without this, **Send to Discord** lists the servers your bot is already in. To also see your servers without the bot, shown dark with an **Invite bot** button, log in with Discord once:
+   - **OAuth2** page → **Redirects** → **Add Redirect** → paste `http://127.0.0.1:53682/callback` (the app has a **Copy link** button) → **Save Changes**
+   - On the same page: **Client Secret** → **Reset Secret** → **Copy**, then **Paste** in the app. Your browser opens Discord; press **Authorize**.
+
+**Name and picture:** the bot is always named **ISdook - emotes downloader** with the ISdook GitHub picture. The app checks both on every start and puts them back if they were changed.
+
+**Only you can use it:** the bot has no commands and never goes online, so other people in your servers can't do anything with it. **Send to Discord** only lists your own servers where you're allowed to add emojis, never other servers the bot might be in. Before every send, the app checks with Discord that the bot is still private and that the server is yours. If one of these fails, nothing is sent and a red line says why.
 
 **Permissions:** the bot only asks for permission to add emojis and stickers. To add emotes, you need **Manage Expressions** (or **Create Expressions**) in that server, and so does the bot.
 
@@ -170,7 +174,7 @@ Changes save instantly.
 |---|---|
 | **General** | Keep running in the tray · Start with Windows · Notice copied 7TV links |
 | **Saving** | Save location · Piece size (128 / 96 / 64 px) · Also keep the original file |
-| **Discord** | Set up and connect your private bot · Privacy check · Invite the bot · Open "Send to Discord" after saving · Disconnect |
+| **Discord** | Step-by-step setup guide · Invite the bot · Open "Send to Discord" after saving · Optional Discord login · Unlink |
 | **Updates** | Check for updates on start · Install updates automatically · Check now · What's new |
 | **About** | Version, GitHub link, settings file location, reset all settings |
 
@@ -204,7 +208,7 @@ Everything runs on your PC. The app only connects to:
 - **PyPI**, only if you choose to download video support
 - **Discord**, only if you set up Send to Discord, and only when you press Send. Emotes go straight from your PC to your server, with no server in between
 
-Your Discord tokens are stored encrypted on your PC (Windows DPAPI). Your other files are never uploaded anywhere.
+Your bot token and Discord login are stored encrypted on your PC (Windows DPAPI). Your other files are never uploaded anywhere.
 
 ## Tips
 
@@ -218,7 +222,8 @@ Your Discord tokens are stored encrypted on your PC (Windows DPAPI). Your other 
 - **A file is still over 256 KB** (shown in orange): lower the frame rate or colours in the Converter, or use fewer pieces.
 - **A video won't open:** accept the one-time video support download when the app asks.
 - **Send to Discord shows a red line:** the line says why. The usual reasons are no free slots, or that you or the bot are missing the **Manage Expressions** permission in that server.
-- **Discord login doesn't finish:** check that the redirect `http://127.0.0.1:53682/callback` is added on the OAuth2 page, exactly like that.
+- **"Private application cannot have a default authorization link":** in the Developer Portal open **Installation**, set **Install Link** to **None**, save, then turn off **Public Bot** again.
+- **Discord login doesn't finish** (step 5): check that the redirect `http://127.0.0.1:53682/callback` is saved on the OAuth2 page, exactly like that.
 - **Something went wrong:** click **Log** at the bottom right of the app to see what happened. You can also [open an issue](https://github.com/ISdook/emotes-downloader/issues).
 
 ---

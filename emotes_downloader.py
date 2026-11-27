@@ -38,7 +38,7 @@ except ImportError:  # pragma: no cover
     print("Pillow is missing. Install it with:  python -m pip install pillow")
     sys.exit(1)
 
-__version__ = "1.7.1"
+__version__ = "1.8.0"
 UA = f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) emotes-downloader/{__version__}"
 GITHUB_REPO = "ISdook/emotes-downloader"
 PORTABLE_ASSET = "Emotes-Downloader-Portable.exe"
@@ -961,23 +961,57 @@ class DiscordLink:
 
     @property
     def user(self):
-        return self.d.get("user") or {}
+        """The logged-in Discord account, or else the bot's owner (that's you: you made the bot)."""
+        return self.d.get("user") or self.d.get("owner") or {}
 
     @property
     def bot_user(self):
         return self.d.get("bot_user") or {}
 
     def configured(self):
-        return bool(self.client_id and self.secret and self.bot)
+        return bool(self.bot)
 
     def connected(self):
-        return self.configured() and bool(self.d.get("refresh"))
+        """Linked = we have your bot's token and its app (the owner is filled in by check_bot on every start)."""
+        return bool(self.bot and self.client_id)
 
-    def set_creds(self, client_id, secret, bot):
-        client_id = re.sub(r"\D", "", client_id or "")
-        if not client_id or not secret.strip() or not bot.strip():
-            raise DiscordError("Fill in the Application ID, Client Secret and Bot Token first.")
-        self.d.update(client_id=client_id, secret=protect(secret.strip()), bot=protect(bot.strip()))
+    def logged_in(self):
+        """Optional extra: logged in with Discord, so servers without the bot can be listed too."""
+        return bool(self.d.get("refresh") and self.secret)
+
+    def link(self, bot_token):
+        """One-step linking: everything else (app ID, owner, invite link) comes from the token."""
+        tok = (bot_token or "").strip().strip('"').strip()
+        if tok.lower().startswith("bot "):
+            tok = tok[4:].strip()
+        if len(tok) < 50 or tok.count(".") != 2:
+            raise DiscordError("That doesn't look like a bot token. On the Bot page press Reset Token, then Copy.")
+        old = self.bot
+        self.d["bot"] = protect(tok)
+        try:
+            self.check_bot()
+        except DiscordError as e:
+            if old:
+                self.d["bot"] = protect(old)
+            else:
+                self.d.pop("bot", None)
+            self._save()
+            if e.status == 401:
+                raise DiscordError("Discord didn't accept that token. Press Reset Token on the Bot page and copy the new one.") from None
+            raise
+        if self.client_id != self.d.get("linked_app"):      # a different bot than before: drop the old login
+            for k in ("refresh", "access", "expires", "user", "secret", "app_branded", "avatar_id", "avatar_src"):
+                self.d.pop(k, None)
+            self.d["linked_app"] = self.client_id
+        self._guild_cache.clear()
+        self._save()
+        self.make_private()
+        return self.user
+
+    def set_secret(self, secret):
+        if not (secret or "").strip():
+            raise DiscordError("Paste the Client Secret first.")
+        self.d["secret"] = protect(secret.strip())
         self._save()
 
     def forget(self, everything=False):
@@ -992,40 +1026,50 @@ class DiscordLink:
     def check_bot(self):
         me = discord_request("GET", "/users/@me", bot=self.bot)
         app = discord_request("GET", "/oauth2/applications/@me", bot=self.bot)
-        if str(app.get("id")) != self.client_id:
-            raise DiscordError("The bot token belongs to a different Discord app than this Application ID.")
-        owner = (app.get("owner") or {}).get("id") or ((app.get("team") or {}).get("owner_user_id"))
+        o = app.get("owner") or {}
+        team = app.get("team") or {}
+        owner = (str(team.get("owner_user_id")) if team.get("owner_user_id") else None) or o.get("id")
+        if team.get("owner_user_id"):
+            o = next((m.get("user") or {} for m in team.get("members") or []
+                      if str((m.get("user") or {}).get("id")) == str(team["owner_user_id"])), {})
         self.d["bot_user"] = dict(id=me.get("id"), name=me.get("username"), avatar=me.get("avatar"))
-        self.d.update(public=bool(app.get("bot_public")), owner_id=str(owner or ""))
+        self.d.update(client_id=str(app.get("id") or me.get("id") or ""), public=bool(app.get("bot_public")),
+                      owner_id=str(owner or ""),
+                      owner=dict(id=str(owner or ""), name=o.get("global_name") or o.get("username") or "you"))
         self._save()
         return me
+
+    def make_private(self):
+        """Try to turn off "Public Bot" for you. If Discord doesn't allow it, Settings shows a Fix button."""
+        if self.is_private():
+            return True
+        try:
+            app = discord_request("PATCH", "/applications/@me", bot=self.bot, json_body={"bot_public": False})
+            self.d["public"] = bool(app.get("bot_public"))
+            self._save()
+        except DiscordError:
+            pass
+        return self.is_private()
 
     def is_private(self):
         """Private = only the owner can invite the bot ("Public Bot" turned off in the portal)."""
         return not self.d.get("public", False)
-
-    def owner_matches(self):
-        uid, owner = str(self.user.get("id") or ""), self.d.get("owner_id") or ""
-        return not uid or not owner or uid == owner
 
     def guard(self, gid):
         """Checked right before every send, so the bot only ever works for its owner, in the owner's own servers.
         The bot has no commands and never goes online, so nobody else in a server can use it."""
         self.check_bot()   # fresh: Public Bot setting and app owner
         if not self.is_private():
-            raise DiscordError("Your bot is set to Public. Turn off “Public Bot” (Settings → Discord → Fix), "
+            raise DiscordError("Your bot is set to Public. Turn off “Public Bot” (Discord settings, step 3), "
                                "so only you can use it.")
         uid, owner = str(self.user.get("id") or ""), self.d.get("owner_id") or ""
         if not uid or not owner or uid != owner:
             raise DiscordError("You're logged in with a different Discord account than the one that owns this bot.")
-        mine = {g["id"]: g for g in self.servers()}   # fresh, from YOUR login, not the bot's
+        mine = {g["id"]: g for g in self.servers()}   # fresh: only servers where YOU are a member and can add emojis
         if gid not in mine:
             raise DiscordError("This isn't one of your servers, or you can't add emojis there anymore.")
         if not mine[gid]["bot_in"]:
             raise DiscordError("The bot isn't in this server yet. Press Invite bot first.")
-
-    def portal_bot_url(self):
-        return f"https://discord.com/developers/applications/{self.client_id}/bot"
 
     def _avatar_bytes(self):
         """Your GitHub picture (cached on this PC)."""
@@ -1114,20 +1158,50 @@ class DiscordLink:
         except DiscordError as e:
             if e.status in (400, 401):
                 self.forget()
-                raise DiscordError("Your Discord login expired. Connect again in Settings → Discord.") from None
+                raise DiscordError("Your Discord login expired. Log in again in Settings → Discord "
+                                   "(step 4) to see servers without the bot.") from None
             raise
 
     # --- servers
-    def servers(self):
-        """Servers where you can add emotes, and whether the bot is in each one."""
-        mine = discord_request("GET", "/users/@me/guilds", bearer=self.access_token())
-        bot_ids, after = set(), None
+    def _bot_guilds(self):
+        out, after = [], None
         while True:
             page = discord_request("GET", "/users/@me/guilds?limit=200" + (f"&after={after}" if after else ""), bot=self.bot)
-            bot_ids |= {g["id"] for g in page}
+            out += page
             if len(page) < 200:
-                break
+                return out
             after = page[-1]["id"]
+
+    def _owner_can(self, gid, uid):
+        """Is `uid` in this server with permission to add emojis? (asked through the bot, no login needed)"""
+        g = discord_request("GET", f"/guilds/{gid}", bot=self.bot)
+        if str(g.get("owner_id")) == str(uid):
+            return True
+        try:
+            m = discord_request("GET", f"/guilds/{gid}/members/{uid}", bot=self.bot)
+        except DiscordError as e:
+            if e.status == 404:          # not a member of this server
+                return False
+            raise
+        roles = {str(r["id"]): int(r.get("permissions") or 0) for r in g.get("roles") or []}
+        perms = roles.get(str(gid), 0)   # @everyone
+        for rid in m.get("roles") or []:
+            perms |= roles.get(str(rid), 0)
+        return bool(perms & (PERM_ADMIN | PERM_MANAGE_EXPR | PERM_CREATE_EXPR))
+
+    def servers(self):
+        """Only YOUR servers where you can add emojis, and whether the bot is in each one.
+        Without the Discord login: the bot's servers where you (its owner) can add emojis.
+        With the login: also your servers the bot isn't in yet (shown dark, with an Invite button)."""
+        bot_guilds = self._bot_guilds()
+        bot_ids = {g["id"] for g in bot_guilds}
+        if not self.logged_in():
+            uid = self.d.get("owner_id") or ""
+            out = [dict(id=g["id"], name=g.get("name", "?"), icon=g.get("icon"), bot_in=True)
+                   for g in bot_guilds if uid and self._owner_can(g["id"], uid)]
+            out.sort(key=lambda g: g["name"].lower())
+            return out
+        mine = discord_request("GET", "/users/@me/guilds", bearer=self.access_token())
         out = []
         for g in mine:
             perms = int(g.get("permissions") or 0)
@@ -1928,7 +2002,7 @@ def run_gui(start_hidden=False):
 
             hdr = ctk.CTkFrame(ctl, fg_color="transparent")
             self.cut_hdr = hdr
-            hdr.grid(row=2, column=0, pady=(18, 8), **pad)
+            hdr.grid(row=2, column=0, pady=(14, 6), **pad)
             self.section(hdr, "Cut into pieces").pack(side="left")
             self.auto = bool(self.cfg.get("auto_grid", True))
             self.auto_btn = self.button(hdr, "Auto", self.on_auto, "accent", width=64, height=26,
@@ -1943,7 +2017,7 @@ def run_gui(start_hidden=False):
             self.mode_help = self.label(ctl, "", 12, "muted", anchor="w", justify="left", wraplength=280)
             self.mode_help.grid(row=4, column=0, pady=(8, 0), **pad)
 
-            self.section(ctl, "Fit").grid(row=6, column=0, pady=(18, 8), **pad)
+            self.section(ctl, "Fit").grid(row=6, column=0, pady=(14, 6), **pad)
             self.fit_seg = self.segmented(ctl, list(FITS), lambda _v: self.on_option())
             self.fit_seg.grid(row=7, column=0, **pad)
             self.fit_help = self.label(ctl, "", 12, "muted", anchor="w", justify="left", wraplength=280)
@@ -1952,14 +2026,18 @@ def run_gui(start_hidden=False):
             self.save_btn = self.button(ctl, "Save", lambda: self.on_save(False), "accent",
                                         height=48, corner_radius=12, font=self.F(15, True),
                                         image=self.ico("download", "#ffffff", 18), compound="left")
-            self.save_btn.grid(row=9, column=0, pady=(16, 0), **pad)
-            self.send_btn = self.button(ctl, "Send to Discord", self.on_send_discord, "discord", height=40,
+            self.save_btn.grid(row=9, column=0, pady=(12, 0), **pad)
+            sf = ctk.CTkFrame(ctl, fg_color="transparent")
+            sf.grid(row=10, column=0, pady=(8, 0), **pad)
+            sf.grid_columnconfigure(0, weight=1)
+            self.send_btn = self.button(sf, "Send to Discord", self.on_send_discord, "discord", height=40,
                                         image=self.ico("send", "#ffffff", 16), compound="left")
-            self.send_btn.grid(row=10, column=0, pady=(8, 0), **pad)
+            self.send_btn.grid(row=0, column=0, sticky="ew")
+            self.discord_link(sf).grid(row=1, column=0, pady=(2, 0))
             self.save_all_btn = self.button(ctl, "Save all", lambda: self.on_save(True), "ghost", height=38)
 
             st = ctk.CTkFrame(ctl, fg_color="transparent")
-            st.grid(row=12, column=0, pady=(14, 0), **pad)
+            st.grid(row=12, column=0, pady=(10, 0), **pad)
             st.grid_columnconfigure(1, weight=1)
             self.label(st, "Save to", 12, "muted").grid(row=0, column=0, padx=(0, 8))
             self.save_menu = ctk.CTkOptionMenu(
@@ -1974,7 +2052,7 @@ def run_gui(start_hidden=False):
             self.path_lbl.bind("<Button-1>", lambda _e: self.on_open_out(True))
 
             self.button(ctl, "Open folder", lambda: self.on_open_out(), "ghost", height=38,
-                        image=self.ico("folder", C["text"], 15), compound="left").grid(row=14, column=0, pady=(14, 16), **pad)
+                        image=self.ico("folder", C["text"], 15), compound="left").grid(row=14, column=0, pady=(10, 14), **pad)
             ctl.grid_rowconfigure(15, weight=1)
 
             # ---- status bar
@@ -2742,135 +2820,241 @@ def run_gui(start_hidden=False):
                 line(g, "Reset all settings", "Puts every option back to how it was on first start.", reset)
 
             def page_discord():
+                # re-drawing the page after a check keeps you where you were
+                y = body._parent_canvas.yview()[0] if sv.get("_on") else 0.0
                 clear()
+                sv["_on"] = True
+                body.after(80, lambda: body.winfo_exists() and body._parent_canvas.yview_moveto(y))
                 head("Discord", "Send emotes and stickers straight to your servers with your own private bot.")
                 dl = self.discord
-                g, row = group(2, "Your account")
+                web = __import__("webbrowser").open
+                portal = "https://discord.com/developers/applications"
+
+                def page_url(sub):
+                    return f"{portal}/{dl.client_id}/{sub}" if dl.client_id else portal
+
+                def bg(work, then):
+                    def job():
+                        try:
+                            res, err = work(), None
+                        except Exception as ex:  # noqa
+                            res, err = None, ex
+                        self.ui(lambda: top.winfo_exists() and then(res, err))
+                    threading.Thread(target=job, daemon=True).start()
+
+                row = 2
                 if dl.connected():
-                    def disconnect():
-                        dl.forget()
-                        self.toast("Disconnected from Discord", "Your app details are kept, so reconnecting is one click.", "info")
+                    g, row = group(row, "Your bot")
+
+                    def unlink():
+                        dl.forget(everything=True)
+                        sv.clear()
+                        self.toast("Bot unlinked", "Paste a bot token again to link one.", "info")
                         page_discord()
-                    line(g, f"Connected as {dl.user.get('name', '?')}",
-                         f"Bot: {dl.bot_user.get('name', '?')} · your tokens are stored encrypted on this PC",
-                         lambda gg: self.button(gg, "Disconnect", disconnect, "ghost", width=110, height=32,
-                                                text_color=C["bad"]))
-                    if dl.is_private() and dl.owner_matches():
-                        line(g, "Private bot", "Only you can add this bot to servers. Its name and picture are kept as "
-                                               f"“{BOT_NAME}”.",
-                             lambda gg: ctk.CTkLabel(gg, text="  Private", image=self.ico("check", C["good"], 14),
-                                                     compound="left", font=self.F(12, True), text_color=C["good"]))
-                    else:
-                        why = ("Your bot is set to Public, so anyone with its link could add it. Turn off “Public Bot” "
-                               "on the Bot page, then press Check again.") if not dl.is_private() else (
-                              "This Discord app belongs to a different account than the one you logged in with.")
-
-                        def recheck():
-                            def job():
-                                try:
-                                    dl.check_bot()
-                                except Exception:
-                                    pass
-                                self.ui(page_discord)
-                            threading.Thread(target=job, daemon=True).start()
-
-                        def fix(gg):
-                            f = ctk.CTkFrame(gg, fg_color="transparent")
-                            self.button(f, "Fix", lambda: __import__("webbrowser").open(dl.portal_bot_url()), "ghost",
-                                        width=70, height=32, image=self.ico("external", C["text"], 13),
-                                        compound="left").pack(side="left", padx=(0, 6))
-                            self.button(f, "Check again", recheck, "ghost", width=100, height=32).pack(side="left")
-                            return f
-                        line(g, "Not private", why, fix, wrap=230, color=C["bad"])
-                    line(g, "Invite the bot to a server", "It only asks for permission to add emojis and stickers.",
-                         lambda gg: self.button(gg, "Invite bot", lambda: __import__("webbrowser").open(dl.invite_url()),
-                                                "ghost", width=110, height=32, image=self.ico("external", C["text"], 13),
-                                                compound="left"))
+                    line(g, f"Linked: {dl.bot_user.get('name') or BOT_NAME}",
+                         f"Owner: {dl.user.get('name', '?')} · the token is stored encrypted on this PC",
+                         lambda gg: self.button(gg, "Unlink", unlink, "ghost", width=100, height=32, text_color=C["bad"]))
+                    line(g, "Add the bot to a server", "It only asks for permission to add emojis and stickers.",
+                         lambda gg: self.button(gg, "Invite bot", lambda: web(dl.invite_url()), "ghost", width=110,
+                                                height=32, image=self.ico("external", C["text"], 13), compound="left"))
                     line(g, "Open “Send to Discord” after saving", "Shows your servers as soon as an emote or sticker is saved.",
                          switch("discord_after_save", value=self.cfg.get("discord_after_save", True)))
-                else:
-                    line(g, "Not connected yet", "Do the steps below once. It takes about two minutes.",
-                         lambda gg: ctk.CTkFrame(gg, width=1, height=1, fg_color="transparent"))
 
-                g, row = group(row, "Setup: your own Discord app")
-                line(g, "1. Create a Discord app",
-                     "In the Developer Portal press New Application (any name). Then open the Bot page: turn OFF "
-                     "“Public Bot” so only you can add it, press Reset Token and copy the token. The app sets the bot's "
-                     f"name and picture to “{BOT_NAME}” by itself.",
-                     lambda gg: self.button(gg, "Open portal",
-                                            lambda: __import__("webbrowser").open("https://discord.com/developers/applications"),
-                                            "ghost", width=120, height=32, image=self.ico("external", C["text"], 13),
-                                            compound="left"), wrap=220)
+                self.section(body, "Setup guide" if not dl.connected() else "Steps").grid(
+                    row=row, column=0, sticky="ew", pady=(4, 6))
+                row += 1
 
+                def step(num, title, desc, done, build=None, warn=None, optional=False):
+                    nonlocal row
+                    c = ctk.CTkFrame(body, fg_color=C["card"], corner_radius=14, border_width=1,
+                                     border_color=C["good"] if done else C["border"])
+                    c.grid(row=row, column=0, sticky="ew", pady=(0, 10))
+                    row += 1
+                    c.grid_columnconfigure(1, weight=1)
+                    ctk.CTkLabel(c, text="" if done else str(num), width=28, height=28, corner_radius=14,
+                                 fg_color=C["good"] if done else C["card_hi"], text_color=C["text"], font=self.F(13, True),
+                                 image=self.ico("check", "#ffffff", 14) if done else None).grid(
+                        row=0, column=0, rowspan=2, sticky="n", padx=(14, 12), pady=14)
+                    t = ctk.CTkFrame(c, fg_color="transparent")
+                    t.grid(row=0, column=1, sticky="w", pady=(14, 0), padx=(0, 14))
+                    self.label(t, title, 14, bold=True, anchor="w").pack(side="left")
+                    if optional:
+                        self.label(t, "  OPTIONAL", 10, "faint", bold=True).pack(side="left")
+                    self.label(c, desc, 12, "muted", anchor="w", justify="left", wraplength=450).grid(
+                        row=1, column=1, sticky="w", pady=(3, 0), padx=(0, 14))
+                    r = 2
+                    if warn:
+                        self.label(c, warn[0], 12, anchor="w", justify="left", wraplength=450,
+                                   text_color=C[warn[1]]).grid(row=r, column=1, sticky="w", pady=(6, 0), padx=(0, 14))
+                        r += 1
+                    if build:
+                        f = ctk.CTkFrame(c, fg_color="transparent")
+                        f.grid(row=r, column=1, sticky="w", pady=(10, 0), padx=(0, 14))
+                        build(f)
+                    ctk.CTkFrame(c, fg_color="transparent", height=14).grid(row=r + 2, column=1)
+
+                def under(f):
+                    """A second line of controls inside a step."""
+                    r_ = ctk.CTkFrame(f.master, fg_color="transparent")
+                    r_.grid(row=int(f.grid_info()["row"]) + 1, column=1, sticky="w", pady=(8, 0), padx=(0, 14))
+                    return r_
+
+                def btn(f, text, cmd, kind="ghost", icon="external", width=None):
+                    b_ = self.button(f, text, cmd, kind, height=32,
+                                     image=self.ico(icon, "#ffffff" if kind == "discord" else C["text"], 13) if icon else None,
+                                     compound="left", **({"width": width} if width else {}))
+                    b_.pack(side="left", padx=(0, 8))
+                    return b_
+
+                def field(f, key, check):
+                    e = ctk.CTkEntry(f, width=250, height=32, corner_radius=8, border_width=1, show="•",
+                                     border_color=C["border"], fg_color=C["field"], text_color=C["text"], font=self.F(12),
+                                     placeholder_text="paste here")
+                    e.pack(side="left", padx=(0, 8))
+
+                    def paste():
+                        try:
+                            v = self.root.clipboard_get().strip()
+                        except Exception:
+                            v = ""
+                        e.delete(0, "end")
+                        e.insert(0, v)
+                        check(v)
+                    btn(f, "Paste", paste, "ghost", None, 80)
+                    e.bind("<Return>", lambda _e: check(e.get()))
+                    return e
+
+                linked = dl.connected()
+                private = linked and dl.is_private()
+
+                # 1 ------------------------------------------------------------
+                step(1, "Create a Discord app",
+                     "Open the Developer Portal and log in with your Discord account. Press New Application "
+                     "(top right), type any name, for example “Emotes”, tick the box and press Create.",
+                     linked, lambda f: btn(f, "Open Developer Portal", lambda: web(portal)))
+
+                # 2 ------------------------------------------------------------
+                def link_token(v):
+                    if not (v or "").strip():
+                        return
+                    sv["token_msg"] = ("Linking your bot…", "muted")
+                    page_discord()
+
+                    def work():
+                        dl.link(v)                    # finds the app + owner, tries to make it private
+                        try:
+                            dl.brand()                # name "ISdook - emotes downloader" + GitHub picture
+                        except Exception as ex:  # noqa (Discord rate-limits renames; retried on next start)
+                            self.log_lines.append(f"Bot name/picture not updated yet: {ex}")
+                        if dl.is_private():
+                            web(dl.invite_url())      # straight to adding the bot to your server
+                            sv["invited"] = True
+                        return dl.user
+
+                    def then(user, err):
+                        sv["token_msg"] = (str(err), "bad") if err else (
+                            f"Linked! Owner: {user.get('name', 'you')}.", "good")
+                        if not err:
+                            self.toast("Bot linked", "Now pick a server for it in your browser." if dl.is_private()
+                                       else "One more step: make the bot private.", "ok")
+                        page_discord()
+                    bg(work, then)
+                step(2, "Copy the bot token and paste it here",
+                     "On the left, open Bot. Press Reset Token, then “Yes, do it!” (Discord may ask for your "
+                     "password or 2-factor code). Press Copy, come back here and press Paste. "
+                     "That's all the app needs: it finds everything else by itself. "
+                     "Keep the token secret, it's the bot's password.",
+                     linked, (lambda f: (btn(f, "Open Bot page", lambda: web(page_url("bot"))),
+                                         field(under(f), "token", link_token))) if not linked else None,
+                     warn=sv.get("token_msg"))
+
+                # 3 ------------------------------------------------------------
+                def check_private():
+                    sv["priv_msg"] = ("Checking…", "muted")
+                    page_discord()
+
+                    def work():
+                        dl.check_bot()
+                        if dl.is_private() and not sv.get("invited"):
+                            web(dl.invite_url())
+                            sv["invited"] = True
+                        return dl.is_private()
+
+                    def then(ok, err):
+                        sv["priv_msg"] = (str(err), "bad") if err else (None if ok else (
+                            "Still public. Turn off Public Bot, press Save Changes, then Check again.", "bad"))
+                        page_discord()
+                    bg(work, then)
+                step(3, "Make the bot private",
+                     "Done for you if Discord allows it. If not: on the Bot page turn off “Public Bot” and press "
+                     "Save Changes, so only you can add it to servers.\n\nIf Discord says “Private application "
+                     "cannot have a default authorization link”: open Installation on the left, set Install Link "
+                     "to None, press Save Changes, then turn off Public Bot again.",
+                     private,
+                     (lambda f: (btn(f, "Open Bot page", lambda: web(page_url("bot"))),
+                                 btn(f, "Open Installation", lambda: web(page_url("installation"))),
+                                 btn(f, "Check", check_private, "ghost", "refresh", 90))) if linked and not private else None,
+                     warn=sv.get("priv_msg") or (("Private: only you can add this bot.", "good") if private else None))
+
+                # 4 ------------------------------------------------------------
+                step(4, "Add the bot to your server",
+                     "It opens by itself after steps 2 and 3. Pick your server and press Authorize. "
+                     "You can add it to more servers any time.",
+                     bool(sv.get("invited")) or (linked and private and "token_msg" not in sv),
+                     (lambda f: btn(f, "Invite bot", lambda: (web(dl.invite_url()), sv.update(invited=True), page_discord()),
+                                    "discord", "external", 130)) if private else None)
+
+                # 5 (optional) -----------------------------------------------
                 def copy_redirect():
                     self.root.clipboard_clear()
                     self.root.clipboard_append(DISCORD_REDIRECT)
-                    status.configure(text="Redirect copied.", text_color=C["good"])
-                line(g, "2. Add this redirect", f"On the OAuth2 page, under Redirects, add:\n{DISCORD_REDIRECT}",
-                     lambda gg: self.button(gg, "Copy", copy_redirect, "ghost", width=90, height=32), wrap=220)
+                    sv["login_msg"] = ("Link copied. Paste it under Redirects and press Save Changes.", "good")
+                    page_discord()
 
-                def entry(value, secret=False):
-                    def make(gg):
-                        e = ctk.CTkEntry(gg, width=200, height=32, corner_radius=8, border_width=1,
-                                         border_color=C["border"], fg_color=C["field"], text_color=C["text"],
-                                         font=self.F(12), show="•" if secret else "")
-                        if value:
-                            e.insert(0, value)
-                        return e
-                    return make
-                e_id = line(g, "3. Application ID", "OAuth2 page → Client ID", entry(dl.client_id), wrap=220)
-                e_sec = line(g, "Client Secret", "OAuth2 page → Client Secret → Reset Secret", entry(dl.secret, True), wrap=220)
-                e_bot = line(g, "Bot Token", "Bot page → Reset Token", entry(dl.bot, True), wrap=220)
-                status = self.label(body, "", 12, anchor="w", justify="left", wraplength=520)
-                status.grid(row=row, column=0, sticky="ew", pady=(0, 8))
-                cbtn = self.button(body, "Connect my Discord account" if not dl.connected() else "Save and reconnect",
-                                   lambda: connect(), "discord", height=42, image=self.ico("send", "#ffffff", 16),
-                                   compound="left")
-                cbtn.grid(row=row + 1, column=0, sticky="ew", pady=(0, 16))
-
-                def connect():
+                def login(v):
                     try:
-                        dl.set_creds(e_id.get(), e_sec.get(), e_bot.get())
+                        dl.set_secret(v)
                     except DiscordError as ex:
-                        status.configure(text=str(ex), text_color=C["bad"])
+                        sv["login_msg"] = (str(ex), "bad")
+                        page_discord()
                         return
-                    cbtn.configure(state="disabled", text="Waiting for you in the browser…")
-                    status.configure(text="Checking the bot, then opening Discord's login page in your browser…",
-                                     text_color=C["muted"])
+                    sv["login_msg"] = ("Log in to Discord in your browser and press Authorize…", "muted")
+                    page_discord()
 
-                    def job():
-                        try:
-                            dl.check_bot()
-                            user = dl.login(__import__("webbrowser").open)
-                            err = None
-                        except Exception as ex:  # noqa
-                            user, err = None, ex
-                        if not err:
-                            try:
-                                dl.brand()
-                            except Exception as ex:  # noqa (name changes are rate-limited by Discord; retried on next start)
-                                self.log_lines.append(f"Bot name/picture not updated yet: {ex}")
-                            # straight to adding the bot to your server
-                            __import__("webbrowser").open(dl.invite_url())
+                    def then(user, err):
+                        msg = str(err) if err else ""
+                        if err and "redirect" in msg.lower():
+                            msg += " Check that the link is saved under Redirects exactly as shown."
+                        sv["login_msg"] = (msg, "bad") if err else (f"Logged in as {user.get('name')}.", "good")
+                        page_discord()
+                    bg(lambda: dl.login(web), then)
 
-                        def done():
-                            if not top.winfo_exists():
-                                return
-                            if err:
-                                cbtn.configure(state="normal", text="Try again")
-                                status.configure(text=str(err), text_color=C["bad"])
-                                return
-                            self.toast("Discord connected", f"Signed in as {user.get('name')}. Now pick a server "
-                                                            "for the bot in your browser.", "ok")
-                            page_discord()
-                        self.ui(done)
-                    threading.Thread(target=job, daemon=True).start()
+                def logout():
+                    dl.forget()
+                    sv.pop("login_msg", None)
+                    page_discord()
+                step(5, "See all your servers",
+                     "Without this, “Send to Discord” lists the servers where your bot already is. To also see "
+                     "your servers without the bot (dark, with an Invite button), log in with Discord once:\n"
+                     f"• OAuth2 page → Redirects → Add Redirect → paste {DISCORD_REDIRECT} → Save Changes\n"
+                     "• Same page → Client Secret → Reset Secret → Copy, then Paste here",
+                     dl.logged_in(),
+                     (lambda f: btn(f, "Log out", logout, "ghost", None, 90)) if dl.logged_in() else
+                     (lambda f: (btn(f, "Copy link", copy_redirect, "ghost", None, 100),
+                                 btn(f, "Open OAuth2 page", lambda: web(page_url("oauth2"))),
+                                 field(under(f), "secret", login))) if linked else None,
+                     warn=sv.get("login_msg") or ((f"Logged in as {dl.user.get('name')}.", "good") if dl.logged_in()
+                                                  else None), optional=True)
+
+            # shared state of the setup guide (kept while you switch pages)
+            sv = self._dc_setup = getattr(self, "_dc_setup", None) or {}
 
             pages = {"General": ("gear", page_general), "Saving": ("folder", page_saving),
                      "Discord": ("send", page_discord), "Updates": ("refresh", page_updates),
                      "About": ("external", page_about)}
 
             def go(name):
+                sv["_on"] = False
                 for n_, b_ in navs.items():
                     on = n_ == name
                     b_.configure(fg_color=C["card_hi"] if on else "transparent",
@@ -3167,7 +3351,7 @@ def run_gui(start_hidden=False):
             self.cv_colors_lbl = self.label(cr, str(int(self.cv_colors.get())), 12, bold=True, width=36)
             self.cv_colors_lbl.grid(row=0, column=1, padx=(8, 0))
             cb = ctk.CTkFrame(opt, fg_color="transparent")
-            cb.grid(row=15, column=0, pady=(12, 0), **pad)
+            cb.grid(row=15, column=0, pady=(10, 0), **pad)
             cb.grid_columnconfigure(0, weight=1)
             self.conv_btn = self.button(cb, "Convert", self.conv_run, "accent", height=46, corner_radius=12,
                                         font=self.F(15, True), image=self.ico("download", "#ffffff", 18), compound="left")
@@ -3177,7 +3361,8 @@ def run_gui(start_hidden=False):
             self.conv_send = self.button(cb, "Send", self.conv_send_discord, "discord", width=96, height=46,
                                          corner_radius=12, image=self.ico("send", "#ffffff", 15), compound="left")
             self.conv_send.grid(row=0, column=1, padx=(8, 0))
-            self.conv_dest.grid(row=17, column=0, pady=(6, 12), **pad)
+            self.discord_link(cb).grid(row=1, column=0, columnspan=2, sticky="e", pady=(2, 0))
+            self.conv_dest.grid(row=17, column=0, pady=(0, 12), **pad)
             self.conv_dest.bind("<Button-1>", lambda _e: self._conv_open_out())
             opt.grid_rowconfigure(18, weight=1)
             self.cv_preset.set(cfg.get("preset", "Emoji"))
@@ -3501,16 +3686,23 @@ def run_gui(start_hidden=False):
             base = res["files"][0][0].stem if len(items) == 1 else re.sub(r"\d+$", "", res["files"][0][0].stem)
             return dict(kind="sticker" if target == "sticker" else "emoji", title=base, items=items)
 
+        def discord_link(self, parent):
+            """Small 'Discord settings' link shown under the Send buttons."""
+            return ctk.CTkButton(parent, text=" Discord settings", command=lambda: self.open_settings("Discord"),
+                                 height=22, corner_radius=6, fg_color="transparent", hover_color=C["card_hi"],
+                                 text_color=C["muted"], font=self.F(11), image=self.ico("gear", C["muted"], 12),
+                                 compound="left", width=10)
+
         def _need_discord(self):
             if self.discord.connected():
                 return False
             self.text_dialog("Send to Discord", "Connect Discord first",
                              "Takes about two minutes, and you only do it once.",
                              "Emotes Downloader adds emotes and stickers with your own private Discord bot.\n\n"
-                             "In Settings → Discord you create a free Discord app, paste in its details, "
-                             "and log in with your Discord account. Then every emote you save can go straight "
-                             "to your servers.",
-                             [("Not now", "ghost", None), ("Open Discord settings", "discord",
+                             "Discord settings has a step-by-step guide: you make a free Discord app and "
+                             "paste its bot token. That's all, and every step is checked for you as you go. "
+                             "Then every emote you save can go straight to your servers.",
+                             [("Not now", "ghost", None), ("Start the setup guide", "discord",
                                                            lambda: self.open_settings("Discord"))])
             return True
 
@@ -3624,7 +3816,8 @@ def run_gui(start_hidden=False):
             acc = ctk.CTkFrame(top, fg_color="transparent")
             acc.grid(row=2, column=0, sticky="ew", padx=24)
             self.label(acc, "CHOOSE A SERVER", 11, "muted", bold=True).pack(side="left")
-            self.label(acc, f"   signed in as {dl.user.get('name', '?')}", 11, "faint").pack(side="left")
+            self.label(acc, f"   {'signed in as' if dl.logged_in() else 'bot owner:'} {dl.user.get('name', '?')}",
+                       11, "faint").pack(side="left")
             self.button(acc, "Refresh", lambda: load(fresh=True), "flat", width=90, height=28,
                         image=self.ico("refresh", C["muted"], 13), compound="left").pack(side="right")
 
@@ -3741,13 +3934,29 @@ def run_gui(start_hidden=False):
                     self.ui(done)
                 threading.Thread(target=job, daemon=True).start()
 
+            def add_more():
+                """Without the Discord login, servers without the bot can't be listed: offer to add it anywhere."""
+                if dl.logged_in():
+                    return
+                f = ctk.CTkFrame(lst, fg_color="transparent")
+                f.pack(fill="x", padx=8, pady=(6, 8))
+                self.button(f, "Add the bot to another server", lambda: (
+                    __import__("webbrowser").open(dl.invite_url()),
+                    warn.configure(text="After adding the bot in your browser, press Refresh.", text_color=C["muted"])),
+                    "ghost", height=34, image=self.ico("external", C["text"], 13), compound="left").pack(side="left")
+                self.label(f, "  Tip: log in with Discord in Discord settings to see all your servers here.",
+                           11, "faint", anchor="w", wraplength=330, justify="left").pack(side="left", fill="x")
+
             def build(servers):
                 for w in lst.winfo_children():
                     w.destroy()
                 st["rows"] = {}
                 if not servers:
-                    self.label(lst, "No servers where you can add emojis.\nYou need “Manage Expressions” or "
-                                    "“Create Expressions” in a server.", 13, "muted", justify="center").pack(pady=30)
+                    self.label(lst, ("No servers where you can add emojis.\nYou need “Manage Expressions” or "
+                                     "“Create Expressions” in a server.") if dl.logged_in() else
+                               "The bot isn't in any of your servers yet.\nAdd it with the button below, then press Refresh.",
+                               13, "muted", justify="center").pack(pady=(30, 10))
+                    add_more()
                     return
                 for i, g in enumerate(servers):
                     inside = g["bot_in"]
@@ -3783,6 +3992,7 @@ def run_gui(start_hidden=False):
                                     compound="left").grid(row=0, column=2, rowspan=2, padx=12)
                     st["rows"][g["id"]] = row
                     fetch_icon(g)
+                add_more()
                 firsts = [g for g in servers if g["bot_in"]]
                 if firsts and st["sel"] is None and len(firsts) == 1:
                     select(firsts[0]["id"])
