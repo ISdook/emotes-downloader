@@ -36,7 +36,7 @@ except ImportError:  # pragma: no cover
     print("Pillow is missing. Install it with:  python -m pip install pillow")
     sys.exit(1)
 
-__version__ = "1.5.1"
+__version__ = "1.5.2"
 UA = f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) emotes-downloader/{__version__}"
 GITHUB_REPO = "ISdook/emotes-downloader"
 PORTABLE_ASSET = "Emotes-Downloader-Portable.exe"
@@ -2065,7 +2065,7 @@ def run_gui(start_hidden=False):
                 txt.grid(row=r_, column=0, sticky="ew", padx=(16, 12), pady=12)
                 self.label(txt, title, 13, anchor="w").pack(anchor="w")
                 if desc:
-                    self.label(txt, desc, 11, "muted", anchor="w", justify="left", wraplength=360).pack(anchor="w", pady=(1, 0))
+                    self.label(txt, desc, 11, "muted", anchor="w", justify="left", wraplength=280).pack(anchor="w", pady=(1, 0))
                 ctl = control_factory(g)
                 ctl.grid(row=r_, column=1, sticky="e", padx=16)
                 g._rows += 1
@@ -2403,16 +2403,16 @@ def run_gui(start_hidden=False):
             self.conv_canvas.bind("<Configure>", lambda _e: self._conv_draw())
             info = ctk.CTkFrame(mid, fg_color="transparent")
             info.grid(row=2, column=0, sticky="ew", padx=18, pady=14)
-            info.grid_columnconfigure((0, 1), weight=1)
+            info.grid_columnconfigure((0, 1), weight=1, uniform="info")
             b1 = ctk.CTkFrame(info, fg_color=C["field"], corner_radius=10)
             b1.grid(row=0, column=0, sticky="ew", padx=(0, 6))
             self.label(b1, "BEFORE", 10, "faint", bold=True).pack(anchor="w", padx=12, pady=(8, 0))
-            self.conv_before = self.label(b1, "-", 12, anchor="w", justify="left", wraplength=250)
+            self.conv_before = self.label(b1, "-", 12, anchor="w", justify="left", wraplength=200)
             self.conv_before.pack(anchor="w", padx=12, pady=(0, 8))
             b2 = ctk.CTkFrame(info, fg_color=C["field"], corner_radius=10)
             b2.grid(row=0, column=1, sticky="ew", padx=(6, 0))
             self.label(b2, "AFTER", 10, "faint", bold=True).pack(anchor="w", padx=12, pady=(8, 0))
-            self.conv_after = self.label(b2, "-", 12, anchor="w", justify="left", wraplength=250)
+            self.conv_after = self.label(b2, "-", 12, anchor="w", justify="left", wraplength=200)
             self.conv_after.pack(anchor="w", padx=12, pady=(0, 8))
 
             # ---- options (right)

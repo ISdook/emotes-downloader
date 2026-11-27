@@ -1,94 +1,176 @@
-# Emotes Downloader: 7TV to Discord
+# Emotes Downloader
 
-Made by [ISdook](https://github.com/ISdook).
+**7TV emotes → Discord, resized and cut into pieces.** Made by [ISdook](https://github.com/ISdook).
 
 Emotes Downloader gets emotes from 7TV and turns them into files you can add as Discord emoji. It works with both animated and static emotes. Each file comes out at 128 px and under Discord's 256 KB limit. It can also cut wide or big emotes into pieces like `:OdaMeeting1::OdaMeeting2::OdaMeeting3:`.
 
-## Download
+It also has a built-in **Converter** for your own images, GIFs and videos, so you never have to upload them to a random website. Everything runs on your own PC.
 
-**[Get the latest version](https://github.com/ISdook/emotes-downloader/releases/latest)**. There are three ways to run it:
+**[⬇ Download the latest version](https://github.com/ISdook/emotes-downloader/releases/latest)**
 
-| File | What it is |
+![The Emotes tab: OdaMeeting cut into 4 pieces](docs/emotes.png)
+
+---
+
+## Features
+
+| | |
 |---|---|
-| **Emotes-Downloader-Setup.exe** | The installer. Adds the app to the Start menu (and the desktop if you want). It installs for your user only, so no admin is needed. |
-| **Emotes-Downloader-Portable.exe** | One file. Just run it from anywhere, even a USB stick. |
-| **Emotes-Downloader-Python.zip** | For running from source. Unzip it and double-click `run.bat`. You need [Python](https://www.python.org/downloads/) with "Add python.exe to PATH" ticked. |
+| **Browse 7TV in the app** | Search 7TV, or look through Trending, Top and New. One click saves an emote, already sized for Discord. |
+| **Paste or copy a link** | Paste a 7TV emote, emote set or user link. Or just copy a link on 7tv.app, and the app notices it and offers **Save now**. |
+| **Cut big emotes into pieces** | **Auto** cuts wide emotes into square pieces, for example a 384×112 emote into `:OdaMeeting1:` to `:OdaMeeting4:`. You can also pick your own grid. |
+| **Discord-ready files** | Animated emotes become GIF and still ones PNG, at 128×128 and under 256 KB, keeping every frame whenever possible. |
+| **Converter** | Make an emoji, a sticker or any custom size from images, GIFs or videos, with your own size, fit, colours, frame rate and pixel-art scaling. |
+| **Drag and drop** | Drop files, whole folders or 7TV links anywhere on the window. |
+| **Files panel** | Collect lots of files or emotes, then save them all at once. |
+| **Tray icon** | Keeps running in the system tray, with a quick panel for saving copied links, browsing and updates. |
+| **Auto-updates** | Updates itself from GitHub releases and shows what's new after each update. |
 
-Windows may show "Windows protected your PC" the first time, because the app isn't code-signed. Click **More info → Run anyway**.
+---
 
-## Updates and changelog
+## Download and install
 
-- The app checks GitHub for a new version when it starts. By default it installs the update by itself and restarts.
-- The button at the top right shows **✓ Up to date** or **⬇ Update to vX**. Click it to check again or to update right away.
-- After every update, a **What's new** window shows the changelog. You can open it any time with the **What's new** button.
-- Each version updates the matching way:
-  - The installer version downloads the new setup and updates in place.
-  - The portable version swaps in the new `.exe`.
-  - The Python version updates `emotes_downloader.py`. It keeps the old file as `.bak`.
-- You can turn off the check on start, or the automatic install, in **⚙ Settings**.
+Get the files from the **[latest release](https://github.com/ISdook/emotes-downloader/releases/latest)**. Pick one:
 
-The full history is in [CHANGELOG.md](CHANGELOG.md).
+| File | Best for |
+|---|---|
+| **Emotes-Downloader-Setup.exe** | Most people. Installs the app with a Start menu shortcut (and a desktop one if you want). It installs for your user only, so no admin is needed. |
+| **Emotes-Downloader-Portable.exe** | No install. One file you can run from anywhere, even a USB stick. |
+| **Emotes-Downloader-Python.zip** | Running from source. Unzip it and double-click `run.bat`. You need [Python](https://www.python.org/downloads/) with "Add python.exe to PATH" ticked. The first run installs the libraries it needs. |
 
-## Use it
+It runs on Windows 10 and 11 (64-bit).
 
-1. Get an emote. There are three ways:
-   - Press **🔍 Browse 7TV**. Search, or look through Trending, Top and New. Press **⬇ Save** on any emote to save it right away, or **Open** to check the cut first.
-   - Copy an emote link on [7tv.app](https://7tv.app/emotes). The app notices the copied link and shows a bar with **Save now**.
-   - Use **Add files** / **Add folder** in the **Files** panel on the left, or drop files on the window. Everything you add is kept in the list until you **Remove** it or press **Clear all**.
-   - Paste a link into the box and press **Load**. This works with an emote, an emote set (`https://7tv.app/emote-sets/<id>`) or a user (`https://7tv.app/users/<id>`). You can also **Open file** for a GIF/PNG/WebP on your PC.
-2. Check the cut. **Auto** picks how many square pieces the emote needs, so each piece is one full-height square. For example, the 384×112 emote [OdaMeeting](https://7tv.app/emotes/01FD667N200009ZAD9VPCVD4JX) becomes 4 pieces, `:OdaMeeting1:` to `:OdaMeeting4:`. The preview shows every piece separately with its name under it. To choose the pieces yourself, use the **Wide / Tall** buttons, and press **Auto** to go back.
-3. Pick how it fits:
+> The first time you open it, Windows may say **"Windows protected your PC"**, because the app isn't code-signed. Click **More info → Run anyway**.
+
+---
+
+## Emotes tab: 7TV to Discord
+
+1. **Get emotes.** There are four ways:
+   - **Browse 7TV**: search, or look through Trending / Top / New. Press **Save** on an emote to save it right away, or **Open** to check the cut first.
+   - **Paste a link** into the box and press **Load**. This works with:
+     - an emote: `https://7tv.app/emotes/<id>`
+     - an emote set: `https://7tv.app/emote-sets/<id>` (every emote in the set)
+     - a user: `https://7tv.app/users/<id>` (their active set)
+     - just an emote ID
+   - **Copy a link** on [7tv.app](https://7tv.app/emotes). A bar pops up with **Save now**.
+   - **Your own files**: use **Add files** / **Add folder** in the Files panel, or drag them onto the window. Images, GIFs and videos all work.
+2. **Check the cut.** The preview shows each piece separately with its `:name:` under it.
+   - **Auto** picks how many square pieces the emote needs, so each one fills a full-height square. Press **Auto** again to turn it off.
+   - Use **Wide / Tall** to choose the grid yourself, for example 2 × 2 for a big emote.
+3. **Pick how it fits:**
    - **Fill** (default): fills each piece edge to edge.
    - **Stretch**: always stretches.
-   - **Bars**: adds transparent bars.
+   - **Bars**: adds transparent bars so nothing is cut off.
    - **Crop**: trims the edges.
-4. Choose where it's saved with **Save to**, under the **Save** button:
+4. **Choose where it's saved** with **Save to**:
    - **App folder** (default): an `Emotes` folder next to the app.
-   - **Downloads**, **Pictures** or **Desktop**: a `7TV Emotes` folder there.
+   - **Downloads**, **Pictures** or **Desktop**.
    - **Custom folder…**: any folder you pick.
-5. Press **Save**.
-   - With a set loaded, tick the emotes you want and press **Save selected**. With nothing ticked, the button says **Save all**.
-6. Upload the pieces to your server (Server Settings → Emoji), then type them next to each other in Discord, like `:OdaMeeting1::OdaMeeting2::OdaMeeting3::OdaMeeting4:`.
+5. **Press Save.**
+   - With several files in the list, **Save all** saves them all.
+   - If you tick some, it becomes **Save selected** and saves only those.
+6. **Add them to Discord.** Upload the pieces to your server (Server Settings → Emoji), then type them next to each other: `:OdaMeeting1::OdaMeeting2::OdaMeeting3::OdaMeeting4:`.
 
-## Converter
+---
 
-The **Converter** tab is for doing it all yourself, without uploading your files to some random website. It accepts any image, GIF, WebP, AVIF or video (MP4, WebM, MOV…).
+## Converter: do it yourself, on your own PC
 
-1. Drop files or a whole folder on the window, or use **Add files** / **Add folder**.
-2. Pick what to make:
+![The Converter tab](docs/converter.png)
+
+The **Converter** tab is for when you want full control and don't want to upload your files to some random website. It accepts PNG, JPG, GIF, WebP, AVIF, BMP and videos (MP4, WebM, MOV, MKV…).
+
+1. **Add files.** Drop files or a whole folder on the window, or use **Add files** / **Add folder**.
+2. **Pick what to make:**
    - **Emoji**: 128×128, up to 256 KB.
    - **Sticker**: 320×320, up to 512 KB.
-   - **Custom**: any size and file size limit.
-3. Fine-tune:
-   - **Format**: Auto, GIF or PNG. Auto picks GIF for animated files and PNG for still ones.
+   - **Custom**: any size and file size limit, up to "No limit".
+3. **Fine-tune:**
+   - **Format**: **Auto**, **GIF** or **PNG**. Auto picks GIF for animated files and PNG for still ones.
    - **Fit**: Fill, Stretch, Bars or Crop.
-   - **Scaling**: Smooth, or **Pixel art** for crisp pixels.
-   - **Colours** and **Frame rate**.
-4. Check the **Before / After** preview. It shows the final size, and the size turns orange if the file is still over the limit.
-5. Press **Convert**. Files are saved to a `Converted` folder inside your save folder.
+   - **Scaling**: Smooth, or **Pixel art** to keep hard pixel edges.
+   - **Frame rate**: keep it, or lower it to 30 / 20 / 15 / 10 fps for smaller files.
+   - **Colours**: 8 to 256.
+4. **Check the preview.** Switch between **Before** and **After**. The final size shows green when it's under the limit and orange when it's still over.
+5. **Press Convert.** Files are saved to a `Converted` folder inside your save folder.
 
-The first time you open a video, the app offers a one-time download of ffmpeg (about 40 MB, from PyPI) to read it. Images and GIFs don't need it.
+**About videos:** the first time you open a video, the app offers a one-time download of **ffmpeg**, a free and widely used video tool. It's about 40 MB, from PyPI, the official Python package site. Images and GIFs never need it.
 
-## Drag and drop
+---
 
-Drop files, a folder, or a 7TV link anywhere on the window:
-- On the **Emotes** tab, they're loaded to be cut. A folder becomes a list you can save all at once.
-- On the **Converter** tab, they're added to the list.
+## Tray icon
 
-**Tray icon:** when you close the window, the app keeps running in the system tray by default. Left-click the tray icon to open the app, or right-click it to open the tray panel. It shows the app's status and the last copied 7TV emote with a **Save** button, plus Browse 7TV, Open emotes folder, Settings, Check for updates, **Open app** and **Exit**. **Settings** has pages for General (tray, start with Windows, copied-link notice), Saving (folder, piece size, keep originals), Updates and About.
+![The tray panel](docs/tray.png)
 
-## What it does to the files
+When you close the window, the app keeps running in the system tray. You can turn this off in Settings.
 
-- **Animated emotes become GIF and static emotes become PNG.** These are the formats Discord accepts for emoji.
-- If a piece would be over 256 KB, the tool keeps **every frame** and shrinks the piece size first, down to 96, 72, 64 or 48 px. Discord never shows an emote bigger than 48 px, so this still looks sharp. Frames are only dropped as a last resort. For video-like emotes it stores only what changes between frames, which leaves room for more pixels. Every piece of one emote gets the same settings, so the pieces stay in sync.
-- Names follow Discord's rules: letters, numbers and `_`, 2 to 32 characters.
-- For cut emotes, each emote gets its own folder with its pieces.
+- **Left-click** the tray icon to open the app.
+- **Right-click** it to open the tray panel. It shows:
+  - the app's status
+  - the last copied 7TV emote, with a **Save** button
+  - **Browse 7TV**, **Open emotes folder** and **Settings**
+  - the update status
+  - **Open app** and **Exit**
+
+---
+
+## Settings
+
+![Settings](docs/settings.png)
+
+Changes save instantly.
+
+| Page | Options |
+|---|---|
+| **General** | Keep running in the tray · Start with Windows · Notice copied 7TV links |
+| **Saving** | Save location · Piece size (128 / 96 / 64 px) · Also keep the original file |
+| **Updates** | Check for updates on start · Install updates automatically · Check now · What's new |
+| **About** | Version, GitHub link, settings file location, reset all settings |
+
+---
+
+## Updates
+
+- On start, the app checks this repo's latest release. By default it installs a new version by itself and restarts. The button at the top shows **Up to date**, or **Update to vX** with download progress.
+- After every update, a **What's new** window shows the changes. The full history is in **[CHANGELOG.md](CHANGELOG.md)**.
+- Each version updates the matching way:
+  - **Installed**: runs the new setup quietly.
+  - **Portable**: swaps in the new `.exe`.
+  - **Python**: updates `emotes_downloader.py` and keeps the old one as `.bak`.
+
+---
+
+## How the files are made
+
+- **Formats:** animated emotes become GIF and still ones PNG. These are the formats Discord accepts for emoji.
+- **Staying under 256 KB:** the app keeps every frame and shrinks the piece first, to 96, 72, 64 or 48 px. Discord shows emotes at 48 px at most, so they still look sharp. Frames are dropped only as a last resort.
+- **Video-like emotes:** the app stores only what changes between frames, which leaves room for more detail.
+- **Cut emotes:** every piece gets the same settings, so the pieces animate in sync. Each cut emote gets its own folder.
+- **Names:** they follow Discord's rules: letters, numbers and `_`, 2 to 32 characters.
+
+## Privacy
+
+Everything runs on your PC. The app only connects to:
+- **7TV**, to find and download emotes
+- **GitHub**, to check for updates
+- **PyPI**, only if you choose to download video support
+
+Your own files are never uploaded anywhere.
 
 ## Tips
 
 - In Discord, a message with only emotes shows them bigger, which is the best way to show off a cut emote.
+- Your server needs **one emoji slot per piece**. Animated pieces use animated slots.
 - 7TV's biggest files are 128 px tall, so a 2×2 version of a square emote is upscaled and looks a bit softer.
-- Your server needs one emoji slot per piece. Animated pieces use animated slots.
+
+## Troubleshooting
+
+- **"Windows protected your PC":** click **More info → Run anyway**. It shows because the app isn't code-signed.
+- **A file is still over 256 KB** (shown in orange): lower the frame rate or colours in the Converter, or use fewer pieces.
+- **A video won't open:** accept the one-time video support download when the app asks.
+- **Something went wrong:** click **Log** at the bottom right of the app to see what happened. You can also [open an issue](https://github.com/ISdook/emotes-downloader/issues).
+
+---
 
 ## Command line (optional)
 
@@ -99,18 +181,18 @@ python emotes_downloader.py https://7tv.app/emote-sets/<id> --out "D:\Emotes"
 python emotes_downloader.py --update
 ```
 
-## Releasing a new version (maintainer)
+## For the maintainer: releasing a new version
 
-1. Change `__version__` near the top of `emotes_downloader.py`, for example to `"1.2.0"`.
+1. Change `__version__` near the top of `emotes_downloader.py`, for example to `"1.6.0"`.
 2. Add a section at the top of **CHANGELOG.md**:
    ```
-   ## v1.2.0 — 2026-12-01
+   ## v1.6.0 — 2026-12-01
    - What changed
    ```
    The build refuses to run without it. This text becomes the release notes and the app's "What's new" window.
 3. Commit and push.
-4. On GitHub, open **Releases → Draft a new release**, create the tag `v1.2.0` and publish it.
+4. On GitHub, open **Releases → Draft a new release**, create the tag `v1.6.0` and publish it.
 
-GitHub Actions then builds the portable `.exe`, the setup `.exe` and the Python zip, and attaches them to the release. Everyone's app picks up the update automatically.
+GitHub Actions then builds the portable `.exe`, the setup `.exe` and the Python zip, and attaches them to the release.
 
 To build locally on Windows, run `build_exe.bat`. The setup `.exe` also needs [Inno Setup 6](https://jrsoftware.org/isdl.php).

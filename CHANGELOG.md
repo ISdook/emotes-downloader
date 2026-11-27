@@ -2,6 +2,11 @@
 
 Every release gets an entry here. The release build fails without one, and the text becomes the GitHub release notes and the app's "What's new" window.
 
+## v1.5.2 — 2026-11-27
+- Settings: long descriptions now wrap instead of getting cut off
+- Converter: the Before / After boxes are the same width and show their full text
+- New README with screenshots and a full guide to every feature
+
 ## v1.5.1 — 2026-11-27
 - Left-click the tray icon to open the app; right-click opens the tray panel
 - The Converter now makes only GIF and PNG, the formats that matter for Discord emotes (Auto picks GIF for animated, PNG for still)
