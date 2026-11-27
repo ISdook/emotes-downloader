@@ -2,6 +2,19 @@
 
 Every release gets an entry here. The release build fails without one, and the text becomes the GitHub release notes and the app's "What's new" window.
 
+## v1.11.0 — 2026-11-27
+- **Log in with Discord: no more making your own bot.** Settings → Discord → **Log in with Discord**. Your browser opens Discord, you press Authorize, and you're done
+  - The public bot **ISdook - emotes downloader** adds your emotes. It can only add and manage emojis and stickers
+  - **Send to Discord** shows only your servers: the ones with the bot are ready to use, the ones without it have an **Invite bot** button that opens right on that server
+  - The Emotes Downloader server checks your permission in that server for every single emote, so nobody can use the bot on a server that isn't theirs
+  - **Switch account** and **Log out** are in Settings → Discord. Your login is stored encrypted on your PC
+- **New dashboard website:** [emotes-downloader.isdook.workers.dev](https://emotes-downloader.isdook.workers.dev)
+  - Log in with Discord and pick a server
+  - Add emotes from a 7TV link or by dropping image files
+  - See all emojis and free slots, rename or delete emojis, and see who added what
+- **New /emote add command in Discord:** paste a 7TV link and the bot adds it to your server
+- Prefer your own private bot? Choose **My own bot (Advanced)** in Settings → Discord. If you already linked your own bot, the app keeps using it until you switch
+
 ## v1.10.0 — 2026-11-27
 - **Send to Discord sends all your ticked emotes at once.** Tick 15 emotes in the Files list and the button says **Send 15 to Discord**. Before, it only sent the one you were looking at. With nothing ticked, it still sends the one you're looking at
 - New, bigger Send to Discord panel:
