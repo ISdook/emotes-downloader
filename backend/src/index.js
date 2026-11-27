@@ -671,6 +671,7 @@ async function sevenTvEmoji(env, link, { name, cut = true } = {}) {
   const biggest = info.files[0];
   const grid = pieceGrid(biggest.width, biggest.height);
   let note = "";
+  let cutError = null;
 
   if (cut && grid.count > 1) {
     if (env.IMAGES) {
@@ -681,6 +682,7 @@ async function sevenTvEmoji(env, link, { name, cut = true } = {}) {
         return { items: pieces.map((p, i) => ({ name: names[i], image: dataUri(p.bytes, mime) })), pieces: pieces.length, animated: info.animated, note };
       } catch (e) {
         console.log("cut failed:", e && e.message);
+        cutError = String((e && e.message) || e).slice(0, 200);
       }
     }
     note = "It's a wide emote, but it couldn't be cut into pieces right now, so it was added in one piece.";
@@ -699,7 +701,7 @@ async function sevenTvEmoji(env, link, { name, cut = true } = {}) {
     }
   }
   if (!bytes || bytes.length > MAX_EMOJI) fail(413, "This emote is too big for Discord. Use the Emotes Downloader app to shrink it.");
-  return { items: [{ name: baseName, image: dataUri(bytes, mime) }], pieces: 1, animated: info.animated, note };
+  return { items: [{ name: baseName, image: dataUri(bytes, mime) }], pieces: 1, animated: info.animated, note, cutError };
 }
 
 // Free emoji slots of one kind (animated or not) in a server, read live with the bot.
@@ -744,7 +746,7 @@ async function apiAdd7tv(req, env, s, guildId) {
   if (body.dry === true) {                 // preview: how it would be cut, nothing is added
     await checkUploadLimit(env, s.user_id);
     const em = await sevenTvEmoji(env, body.link, { name: body.name, cut: body.cut !== false });
-    return json({ ok: true, dry: true, pieces: em.pieces, note: em.note,
+    return json({ ok: true, dry: true, pieces: em.pieces, note: em.note, cut_error: em.cutError || null,
       items: em.items.map((it) => ({ name: it.name, kb: Math.round(it.image.length * 3 / 4 / 1024), image: it.image })) });
   }
   const res = await addSevenTv(env, {
