@@ -139,7 +139,7 @@ Open **Settings → Discord** (or press **Discord settings** under **Send to Dis
 
 You don't even need the app for quick ones:
 - **Website:** [emotes-downloader.isdook.workers.dev](https://emotes-downloader.isdook.workers.dev). Log in with Discord, pick a server, paste a 7TV link or drop image files. You can also see all the server's emojis and free slots, rename or delete emojis, and see who added what.
-- **In Discord:** type `/emote add` and paste a 7TV link (you need the Manage Expressions or Create Expressions permission).
+- **In Discord:** type `/emote add` and paste a 7TV link (you need the Manage Expressions or Create Expressions permission). The name is optional: leave it empty and the bot uses the emote's name from 7TV.
 
 Wide emotes are cut into pieces by themselves, both on the website and with `/emote add`: KEKW becomes `:KEKW1: :KEKW2: :KEKW3: :KEKW4:`. Type the pieces together, with no spaces, to show the whole emote. Don't want that? Untick **Cut wide emotes into pieces** on the website, or use `/emote add cut:False`. Each piece needs a free emoji slot.
 

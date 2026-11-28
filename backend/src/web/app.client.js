@@ -207,7 +207,7 @@
         result.insertBefore(el("div", { class: ok ? "good" : "bad", text: (ok ? "✓ " : "✗ ") + text }), result.firstChild);
       };
       var link = el("input", { type: "text", placeholder: "Paste a 7TV emote link, e.g. https://7tv.app/emotes/…" });
-      var nameIn = el("input", { type: "text", placeholder: "Name (optional)", maxlength: "32" });
+      var nameIn = el("input", { type: "text", placeholder: "Name (empty = 7TV name)", maxlength: "32" });
       var cutBox = el("input", { type: "checkbox", checked: true });
       var cutRow = el("label", { class: "check" }, cutBox, " Cut wide emotes into pieces (:name1: :name2: …)");
       var addBtn = el("button", { class: "btn", onclick: function () {

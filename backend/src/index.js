@@ -674,7 +674,9 @@ async function sevenTvFile(info, file) {
 // Returns { items: [{ name, image }], pieces, note }
 async function sevenTvEmoji(env, link, { name, cut = true } = {}) {
   const info = await sevenTvLookup(env, link);
-  const baseName = name ? cleanEmojiName(name) : info.name;
+  // No name (or only spaces/symbols) → the emote's name on 7TV. Pieces get 1, 2, 3… added to it.
+  const typed = cleanEmojiName(String(name || "").trim(), "");
+  const baseName = typed.replace(/_/g, "").length ? typed : info.name;
   const mime = info.animated ? "image/gif" : "image/png";
   const biggest = info.files[0];
   const grid = pieceGrid(biggest.width, biggest.height);

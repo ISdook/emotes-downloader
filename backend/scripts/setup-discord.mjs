@@ -51,7 +51,7 @@ await call("PUT", `/applications/${CLIENT_ID}/commands`, [{
       type: 1, name: "add", description: "Add a 7TV emote to this server",
       options: [
         { type: 3, name: "link", description: "7TV emote link, like https://7tv.app/emotes/…", required: true },
-        { type: 3, name: "name", description: "Emoji name (optional: letters, numbers and _)", required: false, max_length: 32 },
+        { type: 3, name: "name", description: "Optional. Leave empty to use the 7TV name. Wide emotes get 1, 2, 3… (KEKW1 KEKW2)", required: false, max_length: 32 },
         { type: 5, name: "cut", description: "Cut wide emotes into pieces like :name1: :name2: (default: yes)", required: false },
       ],
     },
